@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sylvan Canopy — WebGPU Modular</title>
+  <link rel="icon" href="data:," />
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-black overflow-hidden m-0 font-sans select-none">
+  <canvas id="viewport" class="w-screen h-screen block"></canvas>
+
+  <!-- ===== Intro Overlay ===== -->
+  <div id="intro-overlay" class="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-emerald-950/95 via-black/90 to-emerald-950/95 transition-opacity duration-700">
+    <div class="text-center px-6 max-w-lg">
+      <div class="text-emerald-300/60 text-xs tracking-[0.4em] uppercase mb-3">Procedural Forest Engine</div>
+      <h1 class="text-4xl md:text-5xl font-bold text-emerald-100 mb-4 tracking-tight">Sylvan Canopy</h1>
+      <p id="backend-text-intro" class="text-emerald-200/60 text-sm mb-2">Inicializando motor…</p>
+      <p class="text-emerald-200/40 text-xs mb-8">WASD / Setas para mover • Mouse para olhar • Shift para correr</p>
+      <button id="btn-enter" class="px-8 py-3 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 font-medium hover:bg-emerald-500/35 hover:border-emerald-300/60 transition cursor-pointer">
+        Entrar na Floresta
+      </button>
+    </div>
+  </div>
+
+  <!-- ===== Badges superiores ===== -->
+  <div class="fixed top-4 left-4 z-40 flex items-center gap-2">
+    <span id="api-pill" class="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-200 text-xs font-medium backdrop-blur-md">—</span>
+    <span id="seed-badge" class="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-white/60 text-xs font-mono backdrop-blur-md">#—</span>
+  </div>
+  <div class="fixed top-4 right-4 z-40 flex items-center gap-2">
+    <span id="fps-counter" class="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-emerald-200/80 text-xs font-mono backdrop-blur-md">— FPS</span>
+    <button id="btn-toggle-hud" title="Mostrar/Ocultar HUD" class="px-3 py-1 rounded-full bg-black/40 border border-white/10 text-white/60 text-xs hover:text-white transition cursor-pointer backdrop-blur-md">HUD</button>
+  </div>
+
+  <!-- ===== Painel de Controles ===== -->
+  <div id="controls-panel" class="fixed bottom-4 left-4 z-40 w-72 p-4 rounded-2xl bg-black/55 border border-emerald-400/15 backdrop-blur-xl text-white transition-all duration-500">
+    <div class="text-emerald-300/70 text-[10px] tracking-[0.3em] uppercase mb-3">Sylvan Canopy</div>
+
+    <div class="flex justify-between text-xs text-emerald-100/80 mb-1">
+      <span>Hora do Dia</span><span id="val-time" class="text-emerald-300/90 font-mono">—</span>
+    </div>
+    <input id="slider-time" type="range" min="0" max="1" step="0.01" value="0.22" class="w-full accent-emerald-400 mb-3" />
+
+    <div class="flex justify-between text-xs text-emerald-100/80 mb-1">
+      <span>Névoa</span><span id="val-fog" class="text-emerald-300/90 font-mono">55%</span>
+    </div>
+    <input id="slider-fog" type="range" min="0" max="1" step="0.01" value="0.55" class="w-full accent-emerald-400 mb-3" />
+
+    <div class="flex justify-between text-xs text-emerald-100/80 mb-1">
+      <span>Vento</span><span id="val-wind" class="text-emerald-300/90 font-mono">43%</span>
+    </div>
+    <input id="slider-wind" type="range" min="0" max="1.5" step="0.01" value="0.65" class="w-full accent-emerald-400 mb-4" />
+
+    <div class="text-emerald-100/80 text-xs mb-1.5">Qualidade</div>
+    <div class="grid grid-cols-4 gap-1 mb-4">
+      <button data-quality="medium" class="q-btn py-1.5 rounded-lg text-xs font-medium text-emerald-100/70 hover:text-white transition cursor-pointer">Médio</button>
+      <button data-quality="high" class="q-btn py-1.5 rounded-lg text-xs font-medium bg-emerald-500/30 text-emerald-200 border border-emerald-400/30 transition cursor-pointer">Alto</button>
+      <button data-quality="ultra" class="q-btn py-1.5 rounded-lg text-xs font-medium text-emerald-100/70 hover:text-white transition cursor-pointer">Ultra</button>
+      <button data-quality="cinematic" class="q-btn py-1.5 rounded-lg text-xs font-medium text-emerald-100/70 hover:text-white transition cursor-pointer">Cine</button>
+    </div>
+
+    <div class="grid grid-cols-2 gap-1.5 mb-3">
+      <button id="btn-regen" class="py-1.5 rounded-lg text-xs font-medium bg-emerald-500/15 border border-emerald-400/25 text-emerald-200 hover:bg-emerald-500/30 transition cursor-pointer">Nova Semente</button>
+      <button id="btn-tour" class="py-1.5 rounded-lg text-xs font-medium bg-white/5 border border-white/10 text-white/80 hover:bg-white/15 transition cursor-pointer"><span id="tour-label">Câmera Livre</span></button>
+      <button id="btn-audio" class="py-1.5 rounded-lg text-xs font-medium bg-white/5 border border-white/10 text-white/80 hover:bg-white/15 transition cursor-pointer flex items-center justify-center gap-1.5">
+        <svg id="icon-audio-off" class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4V5z" stroke-linejoin="round"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        <svg id="icon-audio-on" class="w-3.5 h-3.5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4V5z" stroke-linejoin="round"/><path d="M15.5 8.5a5 5 0 010 7"/><path d="M19 5a9.5 9.5 0 010 14"/></svg>
+        <span id="audio-label">Som: Off</span>
+      </button>
+      <button id="btn-download-zip" class="py-1.5 rounded-lg text-xs font-medium bg-white/5 border border-white/10 text-white/80 hover:bg-white/15 transition cursor-pointer">Baixar .zip</button>
+    </div>
+
+    <div class="flex justify-between text-[10px] text-white/35">
+      <span>Instâncias</span><span id="val-instances" class="font-mono">—</span>
+    </div>
+  </div>
+
+  <!-- ===== Botões touch (mobile) ===== -->
+  <div class="fixed bottom-4 right-4 z-40 flex flex-col gap-2 md:hidden">
+    <button id="touch-fwd" class="w-14 h-14 rounded-full bg-black/50 border border-white/15 text-emerald-200 text-xl backdrop-blur-md">▲</button>
+    <button id="touch-bwd" class="w-14 h-14 rounded-full bg-black/50 border border-white/15 text-emerald-200 text-xl backdrop-blur-md">▼</button>
+  </div>
+
+  <script type="module">
+    import { SylvanApp } from './src/main.js';
+    window.addEventListener('DOMContentLoaded', async () => {
+      // Carrega os fontes dos módulos para o exportador ZIP
+      const files = ['index.html', 'src/math.js', 'src/quality.js', 'src/world.js', 'src/shaders.js', 'src/audio.js', 'src/main.js'];
+      const raw = {};
+      await Promise.all(files.map(async (f) => {
+        const name = f.startsWith('src/') ? f.slice(4) : f;
+        raw[name] = await (await fetch(f)).text();
+      }));
+      const app = new SylvanApp(raw);
+      app.bootstrap();
+      window.sylvan = app; // hook de depuração/console
+    });
+  </script>
+</body>
+</html>
