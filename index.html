@@ -86,7 +86,7 @@
     import { BigBuckApp } from './src/main.js';
     window.addEventListener('DOMContentLoaded', async () => {
       // Carrega os fontes dos módulos para o exportador ZIP
-      const files = ['index.html', 'src/math.js', 'src/quality.js', 'src/world.js', 'src/shaders.js', 'src/audio.js', 'src/main.js'];
+      const files = ['index.html', 'src/math.js', 'src/quality.js', 'src/island.js', 'src/world.js', 'src/shaders.js', 'src/audio.js', 'src/main.js'];
       const raw = {};
       await Promise.all(files.map(async (f) => {
         const name = f.startsWith('src/') ? f.slice(4) : f;

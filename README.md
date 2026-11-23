@@ -2,34 +2,36 @@
 
 Motor de floresta procedural ultra-realista renderizado em **WebGPU**, escrito em **JavaScript puro (ES Modules)** — sem build step, sem `package.json`, sem dependências de npm. O único recurso externo é o Tailwind via CDN para o HUD.
 
-Arquitetura modular inspirada em *Abyssal Garden*.
-
 ## Imagens
 
 | | |
 |---|---|
-| ![Interior da floresta na manhã dourada](screenshots/floresta.jpg) | ![Vista sobre a copa com o maciço ao fundo](screenshots/vale-e-macico.jpg) |
-| **Vale florestal** — duas espécies de árvores, copas multicamadas | **Mapa unificado** — vale rodeado pelo maciço nevado |
+| ![Vista aérea da ilha: maciço central cercado de mata, rio correndo para o mar](screenshots/ilha.jpg) | ![Rio corrente entre as árvores com o maciço ao fundo](screenshots/floresta.jpg) |
+| **A ilha** — maciço central, mata fechada, rios e mar em toda a volta | **Floresta** — duas espécies de árvores, copas multicamadas |
 
 | | |
 |---|---|
-| ![Picos nevados do maciço montanhoso](screenshots/montanha.jpg) | ![Sotobosque com samambaias, troncos e cogumelos](screenshots/sotobosque.jpg) |
-| **Maciço** — cristas erodidas (fbm derivada, estilo iq), scree e neve | **Sotobosque** — samambaias, troncos caídos e rio |
+| ![Cristas erodidas do maciço acima da linha das árvores](screenshots/macico.jpg) | ![Restinga de areia com seixos e grama entre o mar e a mata](screenshots/praia.jpg) |
+| **Maciço** — cristas erodidas (fbm com derivada, estilo iq), scree e prado alpino | **Restinga** — faixa de areia que contorna a ilha inteira |
 
 | | |
 |---|---|
-| ![Floresta ao entardecer](screenshots/entardecer.jpg) | ![Bioluminescência noturna](screenshots/noite.jpg) |
-| **Entardecer** — ciclo de dia completo | **Noite** — cogumelos e vagalumes bioluminescentes |
+| ![Sotobosque com samambaias e pedras musgosas à beira do rio](screenshots/sotobosque.jpg) | ![Sol poente sobre o mar com estrelas aparecendo](screenshots/entardecer.jpg) |
+| **Sotobosque** — samambaias, rochas e o rio corrente | **Entardecer** — ciclo de dia completo, do amanhecer às estrelas |
 
-![HUD com controles de hora do dia, névoa, vento e qualidade](screenshots/hud.jpg)
+| | |
+|---|---|
+| ![Floresta noturna com bioluminescência](screenshots/noite.jpg) | ![HUD com controles de hora do dia, névoa, vento e qualidade](screenshots/hud.jpg) |
+| **Noite** — cogumelos e vagalumes bioluminescentes | **HUD** — hora do dia, névoa, vento, qualidade e exportação |
 
 ## Características
 
-- **Mapa unificado**: vale florestal com rio sinuoso de água corrente no centro, rodeado por maciço montanhoso (inspirado no "Canyon" do iq) com transição contínua e linha das árvores por altitude
-- **Dois biomas em um mundo**: floresta (copas multicamadas, bioluminescência) e montanha (estratos rochosos, picos nevados, prado alpino)
-- **Tudo procedural e determinístico**: terreno, árvores, rochas, samambaias, grama, troncos, cogumelos e esporos — mesma seed, mesmo mundo (`PRNG` + FBM/ridge noise)
+- **Uma ilha inteira, ~2.2km × 1.65km**: a planta vive em `src/island.js` — contorno da costa por série de Fourier polar, maciço central alongado SO–NE (cadeia de cápsulas) e cinco rios com meandros que nascem no sopé e deságuam no mar
+- **Do centro para fora**: maciço rochoso (cristas FBM amortecidas por derivada — `mountainIq`, portado do shader fdlyW4 do iq — scree, prado alpino e neve por altitude/declividade) → mata fechada com clareiras e capões → praia de areia (~78m) → mergulho sob o oceano
+- **Tudo procedural e determinístico**: terreno, árvores (duas espécies, copas multicamadas), rochas, samambaias, grama, troncos, cogumelos e esporos — mesma seed, mesmo mundo (`PRNG` + FBM/ridge noise)
+- **LOD de instâncias**: o renderer só desenha as células visíveis; copa em detalhe cheio até `treeDetailDist`, cartões planos até `treeLodDist`, sub-bosque com fade por `understoryDist`
 - **Instâncias com apoio físico**: rochas amostram a malha renderizada e assentam sobre o ponto mais baixo da sua projeção; troncos repousam sobre o contato mais alto — nada flutua
-- **Pipeline PBR**: Cook-Torrance GGX, shadow mapping com PCF 3×3, céu atmosférico com nuvens procedurais, sombras de nuvens, estrelas, God Rays e Bloom HDR
+- **Pipeline PBR**: Cook-Torrance GGX, shadow mapping com PCF 3×3, céu atmosférico com nuvens procedurais, sombras de nuvens, estrelas, God Rays sobre o shadow map, SSAO e Bloom HDR
 - **Áudio procedural**: sintetizador Web Audio (vento, rio, ambiente) — sem arquivos de som
 - **Exportador `.zip`**: baixa o projeto modular inteiro pelo botão no HUD
 
@@ -57,12 +59,14 @@ Abra `http://localhost:3000`. Requer navegador com WebGPU: Chrome/Edge recentes 
 
 ## Presets de Qualidade
 
-| Preset | Shadow map | Passos God Ray | Res. terreno | Instâncias |
+| Preset | Shadow map | Passos God Ray | Res. terreno | Instâncias (alvo) |
 |---|---|---|---|---|
-| Médio | 1024 | 12 | 150² | ~11k |
-| Alto | 2048 | 20 | 210² | ~22k |
-| Ultra | 3072 | 28 | 260² | ~35k |
-| Cinematográfico | 4096 | 36 | 310² | ~50k |
+| Médio | 1024 | 12 | 380² | ~0,7 M |
+| Alto | 2048 | 20 | 540² | ~1,2 M |
+| Ultra | 3072 | 28 | 680² | ~1,6 M |
+| Cinematográfico | 4096 | 36 | 820² | ~2,0 M |
+
+As contagens são o total da ilha inteira (árvores + copas + sub-bosque). O custo por frame vem das distâncias de LOD de cada preset, não do total gerado.
 
 ## Estrutura
 
@@ -70,12 +74,15 @@ Abra `http://localhost:3000`. Requer navegador com WebGPU: Chrome/Edge recentes 
 |---|---|
 | `index.html` | HUD (Tailwind CDN), canvas e entry point ES Module; carrega os fontes para o exportador ZIP |
 | `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom) + `BigBuckApp` (câmera, input, UI, loop) |
-| `src/world.js` | `ForestWorld` — heightmap por bioma, construtores de mesh e `generateInstances` |
+| `src/world.js` | `ForestWorld` — heightmap da ilha, construtores de mesh e `generateInstances` |
+| `src/island.js` | Planta da ilha — costa, maciço central e rede de rios, compartilhada entre o relevo e o shader de água |
 | `src/shaders.js` | `WGSL_SHADERS` e `WGSL_POST_SHADERS` — pipeline principal e pós-processamento em WGSL |
 | `src/math.js` | `PRNG` determinístico, `ProceduralNoise` (value noise, FBM, ridge) e `Mat4` |
-| `src/quality.js` | `QUALITY_PRESETS` — dpr, shadowRes, godRaySteps, terrainRes e contagens de instâncias |
+| `src/quality.js` | `QUALITY_PRESETS` — dpr, shadowRes, godRaySteps, terrainRes, contagens e distâncias de LOD |
 | `src/audio.js` | `ForestAudio` — sintetizador procedural Web Audio |
 | `textures/` | Texturas fotográficas do pacote de mídia do Shadertoy — **CC BY-NC-SA 3.0**, © shadertoy.com |
+| `screenshots/` | Capturas do mundo atual usadas neste README |
+| `godot/` | Port em progresso para **Godot 4 + C#** (mesma seed, mesma ilha) — ver `godot/README.md` |
 
 ## Licença dos Assets
 

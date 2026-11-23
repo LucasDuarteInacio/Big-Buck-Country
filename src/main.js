@@ -9,6 +9,55 @@ import { ForestWorld } from './world.js';
 import { WGSL_SHADERS, WGSL_POST_SHADERS } from './shaders.js';
 import { ForestAudio } from './audio.js';
 
+// Camadas instanciadas: [mesh, lista de instâncias, pipeline, faixa, sombra].
+// A faixa decide quais células da grade do mundo entram no frame, pela
+// distância à câmera: 'near' = copa em detalhe cheio até detailDist;
+// 'mid' = copa de cartões planos daí até lodDist; 'tree' = near + mid
+// (tronco completo); 'far' = LOD distante além de lodDist; 'under' =
+// sub-bosque até understoryDist; 'all' = toda célula dentro do frustum.
+// Níveis de detalhe da mesma árvore dividem a mesma lista de instâncias.
+// A sombra usa sempre a copa de cartões planos (mesmas folhas, 6× mais leve)
+const INSTANCE_LAYERS = [
+  ['trunkA', 'trunksA', 'solid', 'tree', true],
+  ['trunkB', 'trunksB', 'solid', 'tree', true],
+  ['trunkAFar', 'trunksA', 'solid', 'far', false],
+  ['trunkBFar', 'trunksB', 'solid', 'far', false],
+  ['rock', 'rocks', 'solid', 'all', true],
+  ['log', 'logs', 'solid', 'tree', true],
+  ['mushroom', 'mushrooms', 'solid', 'under', false],
+  ['canopyA', 'canopiesA', 'foliage', 'near', false],
+  ['canopyB', 'canopiesB', 'foliage', 'near', false],
+  ['canopyAMid', 'canopiesA', 'foliage', 'mid', true],
+  ['canopyBMid', 'canopiesB', 'foliage', 'mid', true],
+  ['canopyAFar', 'canopiesAFar', 'foliage', 'far', false],
+  ['canopyBFar', 'canopiesBFar', 'foliage', 'far', false],
+  ['fern', 'ferns', 'foliage', 'under', false],
+  ['grass', 'grasses', 'foliage', 'under', false]
+];
+
+// Planos normalizados (a,b,c,d) de uma view-projection WebGPU (z de 0 a 1)
+// guardada em m[o..o+15]: esquerda, direita, baixo, cima e, com `depth`,
+// perto e longe. Devolve quantos planos escreveu em `out`
+function frustumPlanes(m, o, out, depth) {
+  const count = depth ? 6 : 4;
+  for (let i = 0; i < count; i++) {
+    // Plano i = w ± (linha x | y | z) da matriz; o de perto é só a linha z
+    const r = i >> 1, s = i & 1 ? -1 : 1, w = i === 4 ? 0 : 1;
+    const a = w * m[o + 3] + s * m[o + r], b = w * m[o + 7] + s * m[o + 4 + r];
+    const c = w * m[o + 11] + s * m[o + 8 + r], d = w * m[o + 15] + s * m[o + 12 + r];
+    const len = Math.hypot(a, b, c) || 1;
+    out[i * 4] = a / len; out[i * 4 + 1] = b / len; out[i * 4 + 2] = c / len; out[i * 4 + 3] = d / len;
+  }
+  return count;
+}
+
+function sphereInPlanes(planes, count, x, y, z, r) {
+  for (let i = 0; i < count; i++) {
+    if (planes[i * 4] * x + planes[i * 4 + 1] * y + planes[i * 4 + 2] * z + planes[i * 4 + 3] < -r) return false;
+  }
+  return true;
+}
+
 class WebGPURenderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -324,75 +373,117 @@ class WebGPURenderer {
     if (shadowRes !== this.shadowRes) {
       this.rebuildShadowTexture(shadowRes);
     }
-    if (this.sceneBuffers) {
-      Object.values(this.sceneBuffers).forEach(b => b && b.destroy && b.destroy());
-    }
+    if (this.sceneGpu) this.sceneGpu.forEach(b => b.destroy());
+    this.sceneGpu = [];
+    const buf = (data, usage) => {
+      const b = this.createBuffer(data, usage);
+      this.sceneGpu.push(b);
+      return b;
+    };
     this.sceneBuffers = {
-      terrainVB: this.createBuffer(meshes.terrain.vertices, GPUBufferUsage.VERTEX),
-      terrainIB: this.createBuffer(meshes.terrain.indices, GPUBufferUsage.INDEX),
+      terrainVB: buf(meshes.terrain.vertices, GPUBufferUsage.VERTEX),
+      terrainIB: buf(meshes.terrain.indices, GPUBufferUsage.INDEX),
       terrainIdxCount: meshes.terrain.indices.length,
 
-      waterVB: this.createBuffer(meshes.water.vertices, GPUBufferUsage.VERTEX),
-      waterIB: this.createBuffer(meshes.water.indices, GPUBufferUsage.INDEX),
+      waterVB: buf(meshes.water.vertices, GPUBufferUsage.VERTEX),
+      waterIB: buf(meshes.water.indices, GPUBufferUsage.INDEX),
       waterIdxCount: meshes.water.indices.length,
 
-      trunkAVB: this.createBuffer(meshes.trunkA.vertices, GPUBufferUsage.VERTEX),
-      trunkAIB: this.createBuffer(meshes.trunkA.indices, GPUBufferUsage.INDEX),
-      trunkAIdxCount: meshes.trunkA.indices.length,
-      trunkAInstB: this.createBuffer(instances.trunksA, GPUBufferUsage.VERTEX),
-      trunkAInstCount: instances.trunkACount,
-
-      trunkBVB: this.createBuffer(meshes.trunkB.vertices, GPUBufferUsage.VERTEX),
-      trunkBIB: this.createBuffer(meshes.trunkB.indices, GPUBufferUsage.INDEX),
-      trunkBIdxCount: meshes.trunkB.indices.length,
-      trunkBInstB: this.createBuffer(instances.trunksB, GPUBufferUsage.VERTEX),
-      trunkBInstCount: instances.trunkBCount,
-
-      canopyAVB: this.createBuffer(meshes.canopyA.vertices, GPUBufferUsage.VERTEX),
-      canopyAIB: this.createBuffer(meshes.canopyA.indices, GPUBufferUsage.INDEX),
-      canopyAIdxCount: meshes.canopyA.indices.length,
-      canopyAInstB: this.createBuffer(instances.canopiesA, GPUBufferUsage.VERTEX),
-      canopyAInstCount: instances.canopyACount,
-
-      canopyBVB: this.createBuffer(meshes.canopyB.vertices, GPUBufferUsage.VERTEX),
-      canopyBIB: this.createBuffer(meshes.canopyB.indices, GPUBufferUsage.INDEX),
-      canopyBIdxCount: meshes.canopyB.indices.length,
-      canopyBInstB: this.createBuffer(instances.canopiesB, GPUBufferUsage.VERTEX),
-      canopyBInstCount: instances.canopyBCount,
-
-      fernVB: this.createBuffer(meshes.fern.vertices, GPUBufferUsage.VERTEX),
-      fernIB: this.createBuffer(meshes.fern.indices, GPUBufferUsage.INDEX),
-      fernIdxCount: meshes.fern.indices.length,
-      fernInstB: this.createBuffer(instances.ferns, GPUBufferUsage.VERTEX),
-      fernInstCount: instances.fernCount,
-
-      grassVB: this.createBuffer(meshes.grass.vertices, GPUBufferUsage.VERTEX),
-      grassIB: this.createBuffer(meshes.grass.indices, GPUBufferUsage.INDEX),
-      grassIdxCount: meshes.grass.indices.length,
-      grassInstB: this.createBuffer(instances.grasses, GPUBufferUsage.VERTEX),
-      grassInstCount: instances.grassCount,
-
-      rockVB: this.createBuffer(meshes.rock.vertices, GPUBufferUsage.VERTEX),
-      rockIB: this.createBuffer(meshes.rock.indices, GPUBufferUsage.INDEX),
-      rockIdxCount: meshes.rock.indices.length,
-      rockInstB: this.createBuffer(instances.rocks, GPUBufferUsage.VERTEX),
-      rockInstCount: instances.rockCount,
-
-      logVB: this.createBuffer(meshes.log.vertices, GPUBufferUsage.VERTEX),
-      logIB: this.createBuffer(meshes.log.indices, GPUBufferUsage.INDEX),
-      logIdxCount: meshes.log.indices.length,
-      logInstB: this.createBuffer(instances.logs, GPUBufferUsage.VERTEX),
-      logInstCount: instances.logCount,
-
-      mushVB: this.createBuffer(meshes.mushroom.vertices, GPUBufferUsage.VERTEX),
-      mushIB: this.createBuffer(meshes.mushroom.indices, GPUBufferUsage.INDEX),
-      mushIdxCount: meshes.mushroom.indices.length,
-      mushInstB: this.createBuffer(instances.mushrooms, GPUBufferUsage.VERTEX),
-      mushInstCount: instances.mushroomCount,
-
-      sporeInstB: this.createBuffer(instances.spores, GPUBufferUsage.VERTEX),
+      sporeInstB: buf(instances.spores, GPUBufferUsage.VERTEX),
       sporeCount: instances.sporeCount
     };
+
+    // Camadas instanciadas: os buffers de instância chegam ordenados por
+    // célula, com a faixa de cada célula em grid.starts
+    const grid = instances.grid;
+    const instBuffers = {};
+    this.layers = INSTANCE_LAYERS.map(([meshName, listName, pipe, tier, shadow]) => {
+      const m = meshes[meshName];
+      if (!instBuffers[listName]) instBuffers[listName] = buf(instances[listName], GPUBufferUsage.VERTEX);
+      return {
+        vb: buf(m.vertices, GPUBufferUsage.VERTEX),
+        ib: buf(m.indices, GPUBufferUsage.INDEX),
+        idxCount: m.indices.length,
+        instB: instBuffers[listName],
+        starts: grid.starts[listName],
+        pipe, tier, shadow
+      };
+    });
+    this.grid = grid;
+    // Faixas de células [início, fim) escolhidas a cada frame, por camada
+    const cells = grid.n * grid.n;
+    this.runs = {};
+    this.runCount = {};
+    for (const tier of ['near', 'mid', 'tree', 'far', 'under', 'all', 'shadow']) {
+      this.runs[tier] = new Uint32Array(cells * 2);
+      this.runCount[tier] = 0;
+    }
+    this.cellDist = new Float32Array(cells);
+    this.nearCells = [];
+    this.camPlanes = new Float32Array(16);
+    this.sunPlanes = new Float32Array(24);
+  }
+
+  // Escolhe as células da grade a desenhar neste frame, a partir do próprio
+  // uniform (viewProj, lightViewProj e posição da câmera): culling por
+  // frustum da câmera e do sol + faixas de distância. É o que mantém o
+  // custo do frame proporcional ao que se vê, não ao tamanho da floresta
+  selectCells(u) {
+    const g = this.grid, n = g.n, cs = g.cellSize, half = n * cs * 0.5;
+    const runs = this.runs, count = this.runCount;
+    for (const tier in count) count[tier] = 0;
+    // Células vizinhas na ordem do buffer fundem-se numa faixa só
+    const add = (tier, c) => {
+      const r = runs[tier], k = count[tier];
+      if (k > 0 && r[k * 2 - 1] === c) { r[k * 2 - 1] = c + 1; return; }
+      r[k * 2] = c; r[k * 2 + 1] = c + 1;
+      count[tier] = k + 1;
+    };
+    const camN = frustumPlanes(u, 0, this.camPlanes, false);
+    const sunN = frustumPlanes(u, 32, this.sunPlanes, true);
+    const camX = u[48], camY = u[49], camZ = u[50];
+    const near = this.nearCells, dist = this.cellDist;
+    near.length = 0;
+    for (let c = 0; c < n * n; c++) {
+      const r = g.radius[c];
+      if (r <= 0) continue;
+      const x = -half + ((c % n) + 0.5) * cs, z = -half + (Math.floor(c / n) + 0.5) * cs, y = g.centerY[c];
+      if (sphereInPlanes(this.sunPlanes, sunN, x, y, z, r)) add('shadow', c);
+      if (!sphereInPlanes(this.camPlanes, camN, x, y, z, r)) continue;
+      add('all', c);
+      const dx = x - camX, dy = y - camY, dz = z - camZ;
+      dist[c] = Math.hypot(dx, dy, dz);
+      if (dist[c] < g.lodDist) near.push(c); else add('far', c);
+      // Sub-bosque: distância à borda da célula (cada instância ainda
+      // encolhe até sumir no limite do alcance, no vertex shader)
+      const ex = Math.max(Math.abs(dx) - cs * 0.5, 0), ez = Math.max(Math.abs(dz) - cs * 0.5, 0);
+      if (Math.hypot(ex, ez) < g.understoryDist && Math.abs(dy) < g.understoryDist + r) add('under', c);
+    }
+    // Árvores próximas da frente para o fundo: o depth test barra as copas
+    // escondidas antes do fragment shader (o mais caro da folhagem)
+    near.sort((a, b) => dist[a] - dist[b]);
+    for (const c of near) {
+      add('tree', c);
+      add(dist[c] < g.detailDist ? 'near' : 'mid', c);
+    }
+  }
+
+  // Desenha as faixas de células de uma camada (draws instanciados com firstInstance)
+  drawLayer(pass, layer, tier) {
+    const runs = this.runs[tier], count = this.runCount[tier];
+    let bound = false;
+    for (let i = 0; i < count; i++) {
+      const first = layer.starts[runs[i * 2]];
+      const instCount = layer.starts[runs[i * 2 + 1]] - first;
+      if (instCount <= 0) continue;
+      if (!bound) {
+        pass.setVertexBuffer(0, layer.vb);
+        pass.setVertexBuffer(1, layer.instB);
+        pass.setIndexBuffer(layer.ib, 'uint32');
+        bound = true;
+      }
+      pass.drawIndexed(layer.idxCount, instCount, 0, 0, first);
+    }
   }
 
   resize(width, height) {
@@ -478,6 +569,7 @@ class WebGPURenderer {
   render(uniformData, clearColor) {
     if (!this.depthTexture || !this.sceneBuffers) return;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+    this.selectCells(uniformData);
     const sb = this.sceneBuffers;
     const encoder = this.device.createCommandEncoder();
 
@@ -497,20 +589,11 @@ class WebGPURenderer {
     shadowPass.setIndexBuffer(sb.terrainIB, 'uint32');
     shadowPass.drawIndexed(sb.terrainIdxCount, 1, 0, 0, 0);
 
+    // Só as células que tocam o volume do shadow map
     shadowPass.setPipeline(this.shadowInstancedPipeline);
-    const drawShadowInst = (vb, ib, idxCount, instB, instCount) => {
-      if (instCount <= 0) return;
-      shadowPass.setVertexBuffer(0, vb);
-      shadowPass.setVertexBuffer(1, instB);
-      shadowPass.setIndexBuffer(ib, 'uint32');
-      shadowPass.drawIndexed(idxCount, instCount, 0, 0, 0);
-    };
-    drawShadowInst(sb.trunkAVB, sb.trunkAIB, sb.trunkAIdxCount, sb.trunkAInstB, sb.trunkAInstCount);
-    drawShadowInst(sb.trunkBVB, sb.trunkBIB, sb.trunkBIdxCount, sb.trunkBInstB, sb.trunkBInstCount);
-    drawShadowInst(sb.canopyAVB, sb.canopyAIB, sb.canopyAIdxCount, sb.canopyAInstB, sb.canopyAInstCount);
-    drawShadowInst(sb.canopyBVB, sb.canopyBIB, sb.canopyBIdxCount, sb.canopyBInstB, sb.canopyBInstCount);
-    drawShadowInst(sb.rockVB, sb.rockIB, sb.rockIdxCount, sb.rockInstB, sb.rockInstCount);
-    drawShadowInst(sb.logVB, sb.logIB, sb.logIdxCount, sb.logInstB, sb.logInstCount);
+    for (const layer of this.layers) {
+      if (layer.shadow) this.drawLayer(shadowPass, layer, 'shadow');
+    }
     shadowPass.end();
 
     // 2. HDR SCENE PASS (rgba16float)
@@ -542,25 +625,15 @@ class WebGPURenderer {
 
     // Sólidos Instanciados
     hdrPass.setPipeline(this.solidInstancedPipeline);
-    const drawMainInst = (vb, ib, idxCount, instB, instCount) => {
-      if (instCount <= 0) return;
-      hdrPass.setVertexBuffer(0, vb);
-      hdrPass.setVertexBuffer(1, instB);
-      hdrPass.setIndexBuffer(ib, 'uint32');
-      hdrPass.drawIndexed(idxCount, instCount, 0, 0, 0);
-    };
-    drawMainInst(sb.trunkAVB, sb.trunkAIB, sb.trunkAIdxCount, sb.trunkAInstB, sb.trunkAInstCount);
-    drawMainInst(sb.trunkBVB, sb.trunkBIB, sb.trunkBIdxCount, sb.trunkBInstB, sb.trunkBInstCount);
-    drawMainInst(sb.rockVB, sb.rockIB, sb.rockIdxCount, sb.rockInstB, sb.rockInstCount);
-    drawMainInst(sb.logVB, sb.logIB, sb.logIdxCount, sb.logInstB, sb.logInstCount);
-    drawMainInst(sb.mushVB, sb.mushIB, sb.mushIdxCount, sb.mushInstB, sb.mushInstCount);
+    for (const layer of this.layers) {
+      if (layer.pipe === 'solid') this.drawLayer(hdrPass, layer, layer.tier);
+    }
 
     // Folhagem Dupla-Face Instanciada
     hdrPass.setPipeline(this.foliageInstancedPipeline);
-    drawMainInst(sb.canopyAVB, sb.canopyAIB, sb.canopyAIdxCount, sb.canopyAInstB, sb.canopyAInstCount);
-    drawMainInst(sb.canopyBVB, sb.canopyBIB, sb.canopyBIdxCount, sb.canopyBInstB, sb.canopyBInstCount);
-    drawMainInst(sb.fernVB, sb.fernIB, sb.fernIdxCount, sb.fernInstB, sb.fernInstCount);
-    drawMainInst(sb.grassVB, sb.grassIB, sb.grassIdxCount, sb.grassInstB, sb.grassInstCount);
+    for (const layer of this.layers) {
+      if (layer.pipe === 'foliage') this.drawLayer(hdrPass, layer, layer.tier);
+    }
 
     // Céu por último entre os opacos: o depth test descarta os pixels já
     // cobertos por terreno/folhagem — o fsSky (raymarch de nuvens) é o
@@ -713,10 +786,11 @@ export class BigBuckApp {
     this.windStrength = 0.65;
     this.autoTour = false;
 
-    // Câmera inicia na margem da clareira olhando rio acima e os raios de sol
+    // Câmera inicia na margem da clareira olhando rio acima, para o maciço
+    // (o ponto de partida vem da planta da ilha — world.spawn)
     this.cam = {
-      pos: [0.0, 2.2, 18.0],
-      yaw: Math.PI - 0.55,
+      pos: [this.world.spawn.cam[0], 2.2, this.world.spawn.cam[1]],
+      yaw: this.world.spawn.yaw,
       pitch: 0.06,
       vel: [0, 0, 0],
       flyOffset: 0
@@ -773,8 +847,14 @@ export class BigBuckApp {
       water: this.world.buildWaterMesh(24),
       trunkA: this.world.buildTreeTrunkMesh(0),
       trunkB: this.world.buildTreeTrunkMesh(1),
+      trunkAFar: this.world.buildTreeTrunkMesh(0, 1),
+      trunkBFar: this.world.buildTreeTrunkMesh(1, 1),
       canopyA: this.world.buildCanopyClusterMesh(0),
       canopyB: this.world.buildCanopyClusterMesh(1),
+      canopyAMid: this.world.buildCanopyClusterMesh(0, 1),
+      canopyBMid: this.world.buildCanopyClusterMesh(1, 1),
+      canopyAFar: this.world.buildCanopyClusterMesh(0, 2),
+      canopyBFar: this.world.buildCanopyClusterMesh(1, 2),
       fern: this.world.buildFernMesh(),
       grass: this.world.buildGrassMesh(),
       rock: this.world.buildRockMesh(),
@@ -828,10 +908,11 @@ export class BigBuckApp {
     // Download Projeto Modular (.zip)
     document.getElementById('btn-download-zip').addEventListener('click', async () => {
       const zipFiles = {
-        'README.md': `# Big Buck Country — Ultra-Realistic WebGPU Procedural Forest\n\nArquitetura modular inspirada em Abyssal Garden.\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/world.js\`: Gerador procedural de mapa unificado — vale florestal com rio corrente rodeado por maciço montanhoso (cristas erodidas por fbm com derivada (fdlyW4 do iq), scree ocre, picos nevados)\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
+        'README.md': `# Big Buck Country — Ultra-Realistic WebGPU Procedural Forest\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/island.js\`: Planta da ilha — contorno da costa, espinha do maciço central e rede de rios (compartilhada entre o relevo e o shader de água)\n- \`src/world.js\`: Gerador procedural da ilha — maciço central (cristas erodidas por fbm com derivada (fdlyW4 do iq), scree ocre, cumes nevados) cercado de floresta, rios que descem até o mar e praia em toda a volta\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
         'index.html': this.rawModulesSource['index.html'],
         'src/math.js': this.rawModulesSource['math.js'],
         'src/quality.js': this.rawModulesSource['quality.js'],
+        'src/island.js': this.rawModulesSource['island.js'],
         'src/world.js': this.rawModulesSource['world.js'],
         'src/shaders.js': this.rawModulesSource['shaders.js'],
         'src/audio.js': this.rawModulesSource['audio.js'],
@@ -984,8 +1065,9 @@ export class BigBuckApp {
     if (this.autoTour) {
       const angle = elapsedSec * 0.075;
       const radius = 30.0 + Math.sin(elapsedSec * 0.14) * 12.0;
-      this.cam.pos[0] = Math.cos(angle) * radius;
-      this.cam.pos[2] = Math.sin(angle) * radius;
+      // O passeio orbita a clareira de partida
+      this.cam.pos[0] = this.world.focus[0] + Math.cos(angle) * radius;
+      this.cam.pos[2] = this.world.focus[1] + Math.sin(angle) * radius;
       const groundY = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
       this.cam.pos[1] = groundY + 3.0 + Math.sin(elapsedSec * 0.35) * 0.85;
       this.cam.yaw = -angle - Math.PI * 0.5 + Math.sin(elapsedSec * 0.22) * 0.35;
@@ -993,7 +1075,7 @@ export class BigBuckApp {
       return;
     }
 
-    const speed = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? 14.0 : 6.4;
+    const speed = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? 22.0 : 8.0;
     const forwardX = Math.sin(this.cam.yaw);
     const forwardZ = Math.cos(this.cam.yaw);
     const rightX = Math.cos(this.cam.yaw);
@@ -1020,8 +1102,8 @@ export class BigBuckApp {
     this.cam.pos[0] = Math.max(-limit, Math.min(limit, this.cam.pos[0] + this.cam.vel[0] * dt));
     this.cam.pos[2] = Math.max(-limit, Math.min(limit, this.cam.pos[2] + this.cam.vel[2] * dt));
 
-    if (this.keys.has('Space')) this.cam.flyOffset = Math.min(24.0, this.cam.flyOffset + dt * 7.5);
-    if (this.keys.has('KeyC')) this.cam.flyOffset = Math.max(0.0, this.cam.flyOffset - dt * 7.5);
+    if (this.keys.has('Space')) this.cam.flyOffset = Math.min(120.0, this.cam.flyOffset + dt * 14.0);
+    if (this.keys.has('KeyC')) this.cam.flyOffset = Math.max(0.0, this.cam.flyOffset - dt * 14.0);
 
     const groundY = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
     const bob = len > 0.1 && this.cam.flyOffset < 0.2 ? Math.sin(elapsedSec * 9.5) * 0.055 : 0;
@@ -1119,8 +1201,7 @@ export class BigBuckApp {
 
     this.updateCamera(dt, elapsedSec);
 
-    const streamX = this.world.getStreamOffset(this.cam.pos[2]);
-    this.audio.update(this.windStrength, Math.abs(this.cam.pos[0] - streamX), elapsedSec);
+    this.audio.update(this.windStrength, this.world.riverDist(this.cam.pos[0], this.cam.pos[2]), elapsedSec);
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
     Mat4.perspective(this.projMat, (60 * Math.PI) / 180, aspect, 0.2,
@@ -1161,7 +1242,7 @@ export class BigBuckApp {
     u.set(this.lightVpMat, 32);
 
     u[48] = this.cam.pos[0]; u[49] = this.cam.pos[1]; u[50] = this.cam.pos[2]; u[51] = this.world.seed; // .w: seed p/ hash do leito no shader de água
-    u[52] = atm.sunDir[0];   u[53] = atm.sunDir[1];   u[54] = atm.sunDir[2];   u[55] = 0.0;
+    u[52] = atm.sunDir[0];   u[53] = atm.sunDir[1];   u[54] = atm.sunDir[2];   u[55] = preset.understoryDist; // .w: alcance do sub-bosque (fade no vsInstanced)
     u[56] = atm.sunColor[0]; u[57] = atm.sunColor[1]; u[58] = atm.sunColor[2]; u[59] = 1.0;
     u[60] = atm.skyTop[0];   u[61] = atm.skyTop[1];   u[62] = atm.skyTop[2];   u[63] = 1.0;
     u[64] = atm.skyHorizon[0]; u[65] = atm.skyHorizon[1]; u[66] = atm.skyHorizon[2]; u[67] = 1.0;

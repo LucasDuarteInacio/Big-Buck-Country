@@ -4,13 +4,15 @@
 // Volumetric God Rays Raymarching e Pós-Processamento HDR Bloom (WGSL)
 // ============================================================================
 
+import { ISLAND_WGSL } from './island.js';
+
 export const WGSL_SHADERS = /* wgsl */`
   struct FrameUniforms {
     viewProj: mat4x4<f32>,
     invViewProj: mat4x4<f32>,
     lightViewProj: mat4x4<f32>,
-    cameraPos: vec4<f32>,
-    sunDir: vec4<f32>,
+    cameraPos: vec4<f32>, // w: seed do mundo (hash do leito no shader de água)
+    sunDir: vec4<f32>,    // w: alcance do sub-bosque em metros (fade no vsInstanced)
     sunColor: vec4<f32>,
     skyTopColor: vec4<f32>,
     skyHorizonColor: vec4<f32>,
@@ -212,20 +214,57 @@ export const WGSL_SHADERS = /* wgsl */`
     return val / norm;
   }
 
-  // Profundidade local d'água (>0 = submerso): dentro do canal é a mesma
-  // fórmula de world.js (bedY = -4.3 + fbm), na costa o fundo do mar é o
-  // mesmo seaBed do getTerrainHeight — a linha d'água e a espuma
-  // acompanham rio e praia de verdade
+  // Planta da ilha (costa, maciço e rede de rios) gerada do island.js
+${ISLAND_WGSL}
+
+  // Distância à costa (m, positiva terra adentro) — shoreDist do world.js:
+  // contorno da planta deformado pelo mesmo fbm
+  fn islandShore(x: f32, z: f32) -> f32 {
+    let cdN = worldFbm3(x * 0.0035 + 6.7, z * 0.0035 - 1.9);
+    let p = vec2<f32>(x, z);
+    return islandCoastR(p) * (1.0 + (cdN - 0.5) * 0.09) - length(p);
+  }
+
+  // Profundidade local d'água (>0 = submerso): espelha o getTerrainHeight
+  // do world.js (S=2600 — manter sincronizado) na praia, na várzea e no
+  // leito dos rios (declive contínuo ao mar) e no fundo do mar (seaBed) —
+  // a linha d'água e a espuma acompanham rio e praia de verdade. O chão
+  // da mata, que a água nunca alcança, é aproximado pela cota da várzea
   fn waterDepthAt(x: f32, z: f32) -> f32 {
-    let riverX = sin(z * 0.042 + 0.4) * 13.0 + cos(z * 0.09) * 3.5;
-    let chan = 1.0 - smoothstep(6.0, 15.0, abs(x - riverX)); // = riverMask
-    let bankH = -1.35 + (worldFbm3(x * 0.085 + 4.1, z * 0.085 - 2.8) - 0.5) * 1.8;
-    let bedY = -4.3 + worldFbm3(x * 0.22 + 5.5, z * 0.22 - 3.1);
-    var approxH = mix(bankH, bedY, chan);
-    // Mar ao redor da ilha: além da faixa costeira o fundo afunda
-    let seaM = smoothstep(92.0, 120.0, length(vec2<f32>(x, z + 6.0)));
+    let shore = islandShore(x, z);
     let seaBed = -6.8 + worldFbm3(x * 0.15 - 2.0, z * 0.15 + 4.0) * 1.2;
-    approxH = mix(approxH, seaBed, seaM);
+    // Alto-mar: além do mergulho costeiro (S·0.04) só existe o fundo marinho
+    if (shore <= -104.0) { return -2.38 - seaBed; }
+
+    // Restinga: a planície de praia desce de +1.5 a -0.6 até a orla
+    let flood = -0.3 + (worldFbm3(x * 0.085 + 4.1, z * 0.085 - 2.8) - 0.5) * 1.6;
+    let plainT = 1.0 - smoothstep(0.0, 156.0, shore);
+    let plainW = 1.0 - (1.0 - plainT) * (1.0 - plainT);
+    let beachH = 1.5 - 2.1 * plainT + (worldFbm3(x * 0.055 + 2.2, z * 0.055 - 4.4) - 0.5) * 1.7;
+    var approxH = mix(flood, beachH, plainW);
+
+    // Rios: várzea baixa + canal que alarga rumo à foz (= riverCore/riverMask)
+    let p = vec2<f32>(x, z);
+    let rd = islandRiver(p).z;
+    let core = 6.0 + 7.0 * (1.0 - smoothstep(0.0, 182.0, shore));
+    // dry: canal corta o sopé e some só no miolo do maciço (world.js)
+    let mountM = smoothstep(0.0, 169.0, 78.0 - islandMountSdf(p));
+    let dry = 1.0 - smoothstep(0.45, 0.90, mountM);
+    let valley = (1.0 - smoothstep(core + 9.0, core + 64.0, rd)) * dry;
+    approxH = mix(approxH, min(approxH, flood), valley);
+    let chan = (1.0 - smoothstep(core, core + 9.0, rd)) * dry;
+    // Declive da nascente à foz, ≥1.2 m abaixo de −2.38
+    // (world.js: −5.2 + 1.6·smooth(shore/390) + ruído + cabeça, clamp)
+    var bedY = -5.2 + 1.6 * smoothstep(0.0, 390.0, max(shore, 0.0));
+    bedY += (worldFbm3(x * 0.055 + 5.5, z * 0.055 - 3.1) - 0.5) * 0.25;
+    bedY += (1.0 - smoothstep(0.0, 117.0, islandMountSdf(p))) * 0.25;
+    bedY = min(bedY, -3.58); // waterLevel − 1.2
+    approxH = mix(approxH, bedY, chan);
+
+    // Mar ao redor da ilha: além da orla o fundo afunda (com o mergulho
+    // extra que define a linha de praia)
+    let seaM = 1.0 - smoothstep(-104.0, 0.0, shore);
+    approxH = mix(approxH, seaBed, seaM) - seaM * (1.0 - seaM) * 10.0;
     return -2.38 - approxH;
   }
 
@@ -357,7 +396,14 @@ export const WGSL_SHADERS = /* wgsl */`
     var out: VertexOutput;
     let c = cos(inst.instMeta.x);
     let s = sin(inst.instMeta.x);
-    let scale = inst.instPosScale.w;
+    var scale = inst.instPosScale.w;
+    // Sub-bosque (samambaia/grama, mat 3) só é desenhado perto da câmera:
+    // encolhe até sumir no limite do alcance (sunDir.w) em vez de pipocar
+    // célula a célula
+    if (in.matId > 2.5 && in.matId < 3.5 && frame.sunDir.w > 0.0) {
+      let camDist = distance(inst.instPosScale.xyz, frame.cameraPos.xyz);
+      scale *= 1.0 - smoothstep(frame.sunDir.w * 0.7, frame.sunDir.w, camDist);
+    }
 
     var localPos = vec3<f32>(
       in.position.x * c - in.position.z * s,
@@ -516,9 +562,16 @@ export const WGSL_SHADERS = /* wgsl */`
         bump += (band * 0.22 + dot(rt, vec3<f32>(0.33)) * 0.3) * rockAmt;
       }
 
+      // Máscaras de cobertura vindas do world.js no uv do terreno:
+      // x = areia de praia, y = campo aberto entre os capões de mata
+      let sand = clamp(in.uv.x, 0.0, 1.0);
+      let meadow = clamp(in.uv.y, 0.0, 1.0);
+
       // Chão do vale: serrapilheira + galharia fotográficas (só em baixa altitude
-      // e encosta suave — não nas encostas rochosas do maciço)
-      let valleyAmt = (1.0 - rockAmt) * smoothstep(17.0, 7.0, wp.y);
+      // e encosta suave — não nas encostas rochosas do maciço, nem na areia
+      // da praia; rala no campo, onde o capim cobre o solo)
+      let valleyAmt = (1.0 - rockAmt) * (1.0 - smoothstep(7.0, 17.0, wp.y))
+                    * (1.0 - sand) * (1.0 - 0.75 * meadow);
       if (valleyAmt > 0.0) {
         let litT = texLin(texLitter, wp.xz * 0.115);
         let litLum = dot(litT, vec3<f32>(0.299, 0.587, 0.114));
@@ -529,8 +582,11 @@ export const WGSL_SHADERS = /* wgsl */`
         bump += (litLum * 0.30 + twgLum * 0.40) * valleyAmt;
       }
 
-      // Leito do rio: seixos molhados fotográficos + superfície úmida
-      let wet = smoothstep(-0.9, -2.0, wp.y);
+      // Leito do rio: seixos molhados fotográficos + superfície úmida.
+      // Na praia não há seixos: a faixa junto à linha d'água é areia
+      // molhada — mais escura e lisa que a areia seca
+      let wetLine = 1.0 - smoothstep(-2.0, -0.9, wp.y);
+      let wet = wetLine * (1.0 - sand);
       if (wet > 0.0) {
         let ws = texLin(texWet, wp.xz * 0.30);
         let wsLum = dot(ws, vec3<f32>(0.33));
@@ -538,6 +594,9 @@ export const WGSL_SHADERS = /* wgsl */`
         roughness = mix(roughness, 0.28, wet * 0.8);
         bump += wsLum * 0.45 * wet;
       }
+      let wetSand = wetLine * sand;
+      albedo *= 1.0 - 0.36 * wetSand;
+      roughness = mix(roughness, 0.36, wetSand * 0.8);
     } else if (mat == 1 || mat == 8) {
       // Casca: fissuras verticais profundas, placas rachadas e líquen
       let wp = in.worldPos;
@@ -651,11 +710,27 @@ export const WGSL_SHADERS = /* wgsl */`
       // 2) normal = FBM com derivadas advectado em 2 fases defasadas
       //    (cross-fade no meio do ciclo → corrente contínua, sem pulsação)
       // 3) espuma por rasura/vazão; fundo refratado na etapa de ambiente.
-      // A curva x(z) = sin(z·0.042+0.4)·13 + cos(z·0.09)·3.5 é a do world.js.
+      // A rede de rios é a da planta da ilha (island.js): cada trecho corre
+      // da nascente no maciço para a foz.
       let t = frame.params.x;
       let wp = in.worldPos;
-      let dxdz = 0.546 * cos(wp.z * 0.042 + 0.4) - 0.315 * sin(wp.z * 0.09);
-      let flowDir = normalize(vec2<f32>(dxdz, 1.0)); // corrente corre no sentido +z
+      // Alto-mar em volta da ilha: a ondulação empurra para a costa com
+      // deriva lateral — não segue mais a tangente do rio
+      let shoreW = islandShore(wp.x, wp.z);
+      let seaM = 1.0 - smoothstep(-104.0, 105.0, shoreW);
+      var flowDir = vec2<f32>(0.0, 1.0);
+      // Peso da correnteza sobre a ondulação do mar: dentro do canal o rio
+      // manda até a foz; mar adentro vira uma pluma que abre e se dissolve
+      var rivW = 0.0;
+      if (seaM < 1.0) {
+        let riv = islandRiver(wp.xz); // corrente desce o rio mais próximo
+        flowDir = riv.xy;
+        let core = 6.0 + 7.0 * (1.0 - smoothstep(0.0, 182.0, shoreW));
+        // Pluma da foz: o rio manda até bem mar adentro, sem a ondulação
+        // do mar inverter a correnteza na boca
+        let plume = smoothstep(-160.0, -8.0, shoreW);
+        rivW = (1.0 - smoothstep(core + 4.0, core + 28.0 + (1.0 - plume) * 55.0, riv.z)) * plume;
+      }
 
       // Profundidade (exata no canal: mesmo hash/fbm do world.js) e seu
       // gradiente — a corrente desvia dos baixios como no shader original
@@ -668,24 +743,29 @@ export const WGSL_SHADERS = /* wgsl */`
       ) / gEps;
 
       // Campo de fluxo (GetFlowRate): base rio abaixo, acelera e desvia no
-      // raso, desacelera em poças profundas e a jusante dos baixios
+      // raso, desacelera em poças profundas e a jusante dos baixios.
+      // flow é a velocidade aparente da água: sempre da nascente para o
+      // mar, empurrada do raso para o fundo (wGrad aponta para o fundo)
       var flow = flowDir;
-      flow += -wGrad * 1.6 / (1.0 + depth * 1.5);
+      // Só o componente a favor da correnteza: o leito em declive ao mar
+      // reforça o fluxo; um baixio local nunca inverte o sentido
+      let down = max(dot(wGrad, flowDir), 0.0);
+      flow += flowDir * down * 1.6 / (1.0 + depth * 1.5);
+      flow += (wGrad - flowDir * down) * 0.55 / (1.0 + depth * 1.5);
       flow *= 1.0 / (1.0 + depth * 0.4);
       let gN = wGrad / max(length(wGrad), 0.001);
-      let behind = 0.5 - dot(gN, -flow / max(length(flow), 0.001)) * 0.5;
+      let behind = 0.5 - dot(gN, flow / max(length(flow), 0.001)) * 0.5;
       var slow = clamp(depth * 2.2, 0.0, 1.0);
       slow = mix(slow * 0.9 + 0.1, 1.0, behind * 0.9);
       flow *= 0.5 + slow * 0.5;
       flow *= 0.15 + 0.85 * smoothstep(0.0, 0.5, depth); // poças fora do canal: quase paradas
+      // Trava final: dentro do canal a água não sobe o rio
+      if (rivW > 0.15 && dot(flow, flowDir) < 0.0) { flow = flowDir * max(length(flow), 0.08); }
 
-      // Alto-mar em volta da ilha: a ondulação empurra para a costa com
-      // deriva lateral — não segue mais a tangente do rio
-      let seaM = smoothstep(88.0, 120.0, length(vec2<f32>(wp.x, wp.z + 6.0)));
       wSea = seaM;
-      let toShore = normalize(vec2<f32>(0.0, -6.0) - wp.xz + vec2<f32>(0.001));
+      let toShore = normalize(vec2<f32>(0.001) - wp.xz);
       let seaFlow = toShore * 0.75 + vec2<f32>(-toShore.y, toShore.x) * 0.30;
-      flow = mix(flow, seaFlow, seaM);
+      flow = mix(flow, seaFlow, seaM * (1.0 - rivW));
       let flowSpeed = length(flow);
 
       // Espuma de rasura e vazão (mesma forma funcional do original):
@@ -706,18 +786,38 @@ export const WGSL_SHADERS = /* wgsl */`
       let t1 = fract(wTime + 0.5);
       let uv0 = wp.xz + hash22(floor(wTime)) * 13.0;
       let uv1 = wp.xz + hash22(floor(wTime + 0.5)) * 13.0;
-      // No mar a ondulação é mais baixa em frequência e mais inclinada (swell)
-      let wFreq = mix(4.0, 2.0, seaM);
-      let fMag = 2.5 / (1.0 + flowSpeed * flowSpeed * 5.0) * mix(1.0, 0.42, seaM);
-      let s0 = waterSurf(uv0, flow * (t0 - 0.5), fMag, wFoam, waterFwidth, wFreq);
-      let s1 = waterSurf(uv1, flow * (t1 - 0.5), fMag, wFoam, waterFwidth, wFreq);
+      let fMag = 2.5 / (1.0 + flowSpeed * flowSpeed * 5.0);
+      // O ruído é amostrado em uv + offset: para o padrão andar com flow
+      // o offset tem de recuar (-flow·t) — com o sinal trocado o rio subia
+      let adv0 = -flow * (t0 - 0.5);
+      let adv1 = -flow * (t1 - 0.5);
       let phase = abs(t0 - 0.5) * 2.0;
-      N = normalize(mix(s0.xyz, s1.xyz, phase));
-      wH = mix(s0.w, s1.w, phase);
+      // No mar a ondulação é mais baixa em frequência e mais inclinada
+      // (swell). Rio e mar são duas camadas de frequência FIXA misturadas na
+      // faixa costeira: uma frequência que varia no espaço multiplicaria a
+      // coordenada de mundo e espelharia a correnteza justamente na foz
+      var surf = vec4<f32>(0.0, 1.0, 0.0, 0.5);
+      if (seaM < 0.999) {
+        surf = mix(
+          waterSurf(uv0, adv0, fMag, wFoam, waterFwidth, 4.0),
+          waterSurf(uv1, adv1, fMag, wFoam, waterFwidth, 4.0),
+          phase
+        );
+      }
+      if (seaM > 0.001) {
+        let swell = mix(
+          waterSurf(uv0, adv0, fMag * 0.42, wFoam, waterFwidth, 2.0),
+          waterSurf(uv1, adv1, fMag * 0.42, wFoam, waterFwidth, 2.0),
+          phase
+        );
+        surf = mix(surf, swell, seaM);
+      }
+      N = normalize(surf.xyz);
+      wH = surf.w;
       wFoam = clamp(wFoam + smoothstep(0.62, 0.95, wH) * 0.5 * seaM, 0.0, 1.0); // whitecaps
       let wFoamTex = mix(
-        waterFoamTex(uv0, flow * (t0 - 0.5) * 0.25),
-        waterFoamTex(uv1, flow * (t1 - 0.5) * 0.25),
+        waterFoamTex(uv0, adv0 * 0.25),
+        waterFoamTex(uv1, adv1 * 0.25),
         phase
       );
       wFoamBlend = clamp(1.0 - pow(wFoamTex, wFoam * 5.0 + 0.001), 0.0, 1.0);
@@ -797,16 +897,18 @@ export const WGSL_SHADERS = /* wgsl */`
       // Sol difuso no fundo sob a mesma sombra PCF + cintilação das cristas
       let caust = 0.80 + 0.45 * wH;
       let bedLight = (frame.sunColor.xyz * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;
-      // Extinção espectral do corpo d'água (paleta do original: o azul
-      // extingue antes → cor de chá que deixa o leito de seixos aparecer)
-      var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.50, 0.60, 0.90) * 0.55);
+      // Extinção espectral do corpo d'água (azul extingue antes → chá
+      // esverdeado no rio; no raso ainda resta cor de água, não só seixo)
+      var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.55, 0.70, 1.10) * 0.70);
       // In-scattering: rio tem sedimento esverdeado; no mar a cor profunda
-      // de alto-mar predomina
+      // de alto-mar predomina — peso mínimo no raso para a lâmina não
+      // sumir quando se olha de cima
       let fwd = pow(clamp(dot(-V, L), 0.0, 1.0), 2.0);
-      let sedCol = mix(vec3<f32>(0.14, 0.20, 0.14), vec3<f32>(0.05, 0.15, 0.21), wSea);
+      let sedCol = mix(vec3<f32>(0.10, 0.18, 0.16), vec3<f32>(0.04, 0.14, 0.22), wSea);
+      let scatter = (1.0 - exp(-pathT * 1.1)) * (0.40 + 0.60 * fwd) + 0.18 * (1.0 - wSea);
       transmit += sedCol
                 * (frame.sunColor.xyz * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
-                * (1.0 - exp(-pathT * 0.8)) * (0.35 + 0.65 * fwd);
+                * scatter;
 
       // Reflexo do céu + nuvens procedurais projetadas no plano a 55m
       let R = reflect(-V, N);
