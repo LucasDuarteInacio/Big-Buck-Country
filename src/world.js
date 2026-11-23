@@ -82,8 +82,9 @@ export class ForestWorld {
   }
 
   // Meia-largura do leito plano: os rios alargam ao se aproximar da foz
+  // (≥14 m para a malha ~5 m/célula ter vários vértices sob a água)
   riverCore(shore) {
-    return 6.0 + 7.0 * (1.0 - smooth01(shore / (this.worldSize * 0.07)));
+    return 14.0 + 6.0 * (1.0 - smooth01(shore / (this.worldSize * 0.07)));
   }
 
   // Canal do rio: leito escavado abaixo do nível d'água (-2.38), com
@@ -175,21 +176,26 @@ export class ForestWorld {
     if (rd < core + 64.0 && mask < 1.0) {
       // O canal corta o sopé e só some bem dentro do maciço (mask≳0.9)
       const dry = 1.0 - smooth01((mask - 0.45) / 0.45);
-      const valley = (1.0 - smooth01((rd - core - 9.0) / 55.0)) * dry;
-      const flood = -0.3 + (this.noise.fbm(x * 0.085 + 4.1, z * 0.085 - 2.8, 3) - 0.5) * 1.6;
+      const valley = (1.0 - smooth01((rd - core - 14.0) / 50.0)) * dry;
+      // Margens da várzea: um pouco acima da linha d'água (−2.38)
+      const flood = -0.55 + (this.noise.fbm(x * 0.085 + 4.1, z * 0.085 - 2.8, 3) - 0.5) * 0.9;
       h = h * (1.0 - valley) + Math.min(h, flood) * valley;
-      const rMask = (1.0 - smooth01((rd - core) / 9.0)) * dry;
+      const rMask = (1.0 - smooth01((rd - core) / 8.0)) * dry;
       if (rMask > 0.0) {
-        // Leito em declive contínuo da nascente à foz, SEMPRE ≥1.2 m
-        // abaixo da linha d'água (−2.38): ~−3.6 na nascente → ~−5.2 na
-        // orla — corpo d'água visível e correnteza ao mar (espelhado em
+        // Leito em declive contínuo da nascente à foz, SEMPRE ≥1.5 m
+        // abaixo da linha d'água (−2.38): ~−3.9 na nascente → ~−5.3 na
+        // orla — corpo d'água largo e correnteza ao mar (espelhado em
         // waterDepthAt)
-        let bedY = -5.2 + 1.6 * smooth01(Math.max(0.0, shore) / (S * 0.15));
-        bedY += (this.noise.fbm(x * 0.055 + 5.5, z * 0.055 - 3.1, 3) - 0.5) * 0.25;
-        // Cabeceira: o leito rasa um pouco junto ao sopé (ainda fundo)
-        bedY += (1.0 - smooth01(mountSdf(x, z) / (S * 0.045))) * 0.25;
-        bedY = Math.min(bedY, this.waterLevel - 1.2);
+        let bedY = -5.3 + 1.4 * smooth01(Math.max(0.0, shore) / (S * 0.15));
+        bedY += (this.noise.fbm(x * 0.055 + 5.5, z * 0.055 - 3.1, 3) - 0.5) * 0.2;
+        bedY += (1.0 - smooth01(mountSdf(x, z) / (S * 0.045))) * 0.2;
+        bedY = Math.min(bedY, this.waterLevel - 1.5);
         h = h * (1.0 - rMask) + bedY * rMask;
+      }
+      // Trava: no miolo do canal a malha nunca fura o plano d'água
+      // (triângulos das margens não podem empurrar vértices para cima)
+      if (rd < core * 0.9 && dry > 0.4) {
+        h = Math.min(h, this.waterLevel - 1.0);
       }
     }
 
@@ -1186,6 +1192,7 @@ export class ForestWorld {
       if (!pickForest(1)) continue;
       const x = spot[0], z = spot[1];
       if (this.shoreDist(x, z) < S * 0.028) continue;
+      if (this.riverMask(x, z) > 0.35) continue;
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.25 || y > 11.0) continue;
       const density = this.noise.noise2D(x * 0.11 + 20, z * 0.11 - 15);
@@ -1198,6 +1205,7 @@ export class ForestWorld {
     for (let i = preset.grassTufts * 8; i > 0 && grasses.count < preset.grassTufts; i--) {
       const x = rng.range(-half, half), z = rng.range(-half, half);
       if (this.shoreDist(x, z) < S * 0.01) continue; // areia nua junto ao mar
+      if (this.riverMask(x, z) > 0.35) continue; // grama não nasce no leito
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.3 || y > 18.0) continue;
       grasses.push(cellOf(x, y, z), x, y - 0.03, z, rng.range(0.75, 1.55), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.3), 1.15);

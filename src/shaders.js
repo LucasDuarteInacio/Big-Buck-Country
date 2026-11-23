@@ -237,7 +237,7 @@ ${ISLAND_WGSL}
     if (shore <= -104.0) { return -2.38 - seaBed; }
 
     // Restinga: a planície de praia desce de +1.5 a -0.6 até a orla
-    let flood = -0.3 + (worldFbm3(x * 0.085 + 4.1, z * 0.085 - 2.8) - 0.5) * 1.6;
+    let flood = -0.55 + (worldFbm3(x * 0.085 + 4.1, z * 0.085 - 2.8) - 0.5) * 0.9;
     let plainT = 1.0 - smoothstep(0.0, 156.0, shore);
     let plainW = 1.0 - (1.0 - plainT) * (1.0 - plainT);
     let beachH = 1.5 - 2.1 * plainT + (worldFbm3(x * 0.055 + 2.2, z * 0.055 - 4.4) - 0.5) * 1.7;
@@ -246,20 +246,23 @@ ${ISLAND_WGSL}
     // Rios: várzea baixa + canal que alarga rumo à foz (= riverCore/riverMask)
     let p = vec2<f32>(x, z);
     let rd = islandRiver(p).z;
-    let core = 6.0 + 7.0 * (1.0 - smoothstep(0.0, 182.0, shore));
+    let core = 14.0 + 6.0 * (1.0 - smoothstep(0.0, 182.0, shore));
     // dry: canal corta o sopé e some só no miolo do maciço (world.js)
     let mountM = smoothstep(0.0, 169.0, 78.0 - islandMountSdf(p));
     let dry = 1.0 - smoothstep(0.45, 0.90, mountM);
-    let valley = (1.0 - smoothstep(core + 9.0, core + 64.0, rd)) * dry;
+    let valley = (1.0 - smoothstep(core + 14.0, core + 64.0, rd)) * dry;
     approxH = mix(approxH, min(approxH, flood), valley);
-    let chan = (1.0 - smoothstep(core, core + 9.0, rd)) * dry;
-    // Declive da nascente à foz, ≥1.2 m abaixo de −2.38
-    // (world.js: −5.2 + 1.6·smooth(shore/390) + ruído + cabeça, clamp)
-    var bedY = -5.2 + 1.6 * smoothstep(0.0, 390.0, max(shore, 0.0));
-    bedY += (worldFbm3(x * 0.055 + 5.5, z * 0.055 - 3.1) - 0.5) * 0.25;
-    bedY += (1.0 - smoothstep(0.0, 117.0, islandMountSdf(p))) * 0.25;
-    bedY = min(bedY, -3.58); // waterLevel − 1.2
+    let chan = (1.0 - smoothstep(core, core + 8.0, rd)) * dry;
+    // Declive da nascente à foz, ≥1.5 m abaixo de −2.38
+    var bedY = -5.3 + 1.4 * smoothstep(0.0, 390.0, max(shore, 0.0));
+    bedY += (worldFbm3(x * 0.055 + 5.5, z * 0.055 - 3.1) - 0.5) * 0.2;
+    bedY += (1.0 - smoothstep(0.0, 117.0, islandMountSdf(p))) * 0.2;
+    bedY = min(bedY, -3.88); // waterLevel − 1.5
     approxH = mix(approxH, bedY, chan);
+    // Trava do miolo (world.js): terreno sob a água no eixo do canal
+    if (rd < core * 0.9 && dry > 0.4) {
+      approxH = min(approxH, -3.38); // waterLevel − 1.0
+    }
 
     // Mar ao redor da ilha: além da orla o fundo afunda (com o mergulho
     // extra que define a linha de praia)
@@ -725,7 +728,7 @@ ${ISLAND_WGSL}
       if (seaM < 1.0) {
         let riv = islandRiver(wp.xz); // corrente desce o rio mais próximo
         flowDir = riv.xy;
-        let core = 6.0 + 7.0 * (1.0 - smoothstep(0.0, 182.0, shoreW));
+        let core = 14.0 + 6.0 * (1.0 - smoothstep(0.0, 182.0, shoreW));
         // Pluma da foz: o rio manda até bem mar adentro, sem a ondulação
         // do mar inverter a correnteza na boca
         let plume = smoothstep(-160.0, -8.0, shoreW);
@@ -745,13 +748,11 @@ ${ISLAND_WGSL}
       // Campo de fluxo (GetFlowRate): base rio abaixo, acelera e desvia no
       // raso, desacelera em poças profundas e a jusante dos baixios.
       // flow é a velocidade aparente da água: sempre da nascente para o
-      // mar, empurrada do raso para o fundo (wGrad aponta para o fundo)
+      // mar (flowDir já aponta à foz); wGrad só desvia, nunca inverte
       var flow = flowDir;
-      // Só o componente a favor da correnteza: o leito em declive ao mar
-      // reforça o fluxo; um baixio local nunca inverte o sentido
-      let down = max(dot(wGrad, flowDir), 0.0);
-      flow += flowDir * down * 1.6 / (1.0 + depth * 1.5);
-      flow += (wGrad - flowDir * down) * 0.55 / (1.0 + depth * 1.5);
+      let along = max(dot(wGrad, flowDir), 0.0);
+      flow += flowDir * (0.35 + along * 1.1) / (1.0 + depth * 1.5);
+      flow += (wGrad - flowDir * dot(wGrad, flowDir)) * 0.45 / (1.0 + depth * 1.5);
       flow *= 1.0 / (1.0 + depth * 0.4);
       let gN = wGrad / max(length(wGrad), 0.001);
       let behind = 0.5 - dot(gN, flow / max(length(flow), 0.001)) * 0.5;
@@ -759,14 +760,18 @@ ${ISLAND_WGSL}
       slow = mix(slow * 0.9 + 0.1, 1.0, behind * 0.9);
       flow *= 0.5 + slow * 0.5;
       flow *= 0.15 + 0.85 * smoothstep(0.0, 0.5, depth); // poças fora do canal: quase paradas
-      // Trava final: dentro do canal a água não sobe o rio
-      if (rivW > 0.15 && dot(flow, flowDir) < 0.0) { flow = flowDir * max(length(flow), 0.08); }
+      // Trava: no canal a componente contra a foz é descartada
+      if (rivW > 0.15) {
+        let back = min(dot(flow, flowDir), 0.0);
+        flow -= flowDir * back;
+        if (dot(flow, flowDir) < 0.05) { flow = flowDir * 0.12; }
+      }
 
       wSea = seaM;
       let toShore = normalize(vec2<f32>(0.001) - wp.xz);
       let seaFlow = toShore * 0.75 + vec2<f32>(-toShore.y, toShore.x) * 0.30;
       flow = mix(flow, seaFlow, seaM * (1.0 - rivW));
-      let flowSpeed = length(flow);
+      let flowSpeed = min(length(flow), 1.15); // evita espuma branca cobrindo o rio
 
       // Espuma de rasura e vazão (mesma forma funcional do original):
       // corredeiras rasas embranquecem, poças profundas ficam escuras
@@ -897,15 +902,13 @@ ${ISLAND_WGSL}
       // Sol difuso no fundo sob a mesma sombra PCF + cintilação das cristas
       let caust = 0.80 + 0.45 * wH;
       let bedLight = (frame.sunColor.xyz * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;
-      // Extinção espectral do corpo d'água (azul extingue antes → chá
-      // esverdeado no rio; no raso ainda resta cor de água, não só seixo)
-      var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.55, 0.70, 1.10) * 0.70);
-      // In-scattering: rio tem sedimento esverdeado; no mar a cor profunda
-      // de alto-mar predomina — peso mínimo no raso para a lâmina não
-      // sumir quando se olha de cima
+      // Extinção espectral: azul some antes → chá esverdeado; absorção
+      // mais forte para o leito não "passar por água seca" de cima
+      var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.90, 1.15, 1.70) * 1.05);
       let fwd = pow(clamp(dot(-V, L), 0.0, 1.0), 2.0);
-      let sedCol = mix(vec3<f32>(0.10, 0.18, 0.16), vec3<f32>(0.04, 0.14, 0.22), wSea);
-      let scatter = (1.0 - exp(-pathT * 1.1)) * (0.40 + 0.60 * fwd) + 0.18 * (1.0 - wSea);
+      // Rio: chá escuro esverdeado; mar: azul profundo — legível sob névoa
+      let sedCol = mix(vec3<f32>(0.035, 0.095, 0.090), vec3<f32>(0.015, 0.08, 0.18), wSea);
+      let scatter = (1.0 - exp(-pathT * 1.55)) * (0.55 + 0.45 * fwd) + 0.40 * (1.0 - wSea);
       transmit += sedCol
                 * (frame.sunColor.xyz * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
                 * scatter;
@@ -926,14 +929,16 @@ ${ISLAND_WGSL}
       skyRefl += frame.sunColor.xyz * pow(max(dot(rAzim, lAzim), 0.0), 2.5)
                * exp(-max(R.y, 0.0) * 5.0) * 0.18 * clamp(frame.params.w * 2.0, 0.0, 1.0);
 
-      let fresW = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+      // Fresnel com piso: de cima o rio ainda reflete um pouco o céu
+      let fresW = 0.08 + 0.92 * pow(1.0 - NdotV, 5.0);
       var waterCol = mix(transmit, skyRefl * (0.30 + 0.70 * shadow), fresW);
 
-      // Espuma: filamentos carregados rio abaixo + faixa viva na linha d'água
+      // Espuma: filamentos rio abaixo + faixa na linha d'água (sem cobrir o leito)
       let edgeLine = smoothstep(0.0, 0.04, depthW) * (1.0 - smoothstep(0.06, 0.30, depthW));
       let foamAmt = clamp(
-        wFoamBlend * (0.35 + 0.65 * clamp(depthW * 6.0, 0.0, 1.0)) + edgeLine * 0.6,
-        0.0, 1.0
+        wFoamBlend * (0.22 + 0.45 * clamp(depthW * 4.0, 0.0, 1.0)) * (0.35 + 0.65 * wFoam)
+          + edgeLine * 0.55,
+        0.0, 0.72
       );
       let foamCol = (frame.sunColor.xyz * 1.35 * max(NdotL, 0.12) * shadow + skyAmbient * 0.8)
                   * vec3<f32>(0.62, 0.66, 0.62);
