@@ -11,6 +11,7 @@ export class ForestAudio {
     this.windGain = null;
     this.windFilter = null;
     this.streamGain = null;
+    this.rainGain = null;
     this.birdTimer = null;
   }
 
@@ -79,7 +80,25 @@ export class ForestAudio {
     this.streamGain.connect(this.masterGain);
     streamSrc.start();
 
-    // 3. Pássaros distantes
+    // 3. Chuva — corte de graves e agudos metálicos, volume segue o slider
+    const rainSrc = this.ctx.createBufferSource();
+    rainSrc.buffer = noiseBuffer;
+    rainSrc.loop = true;
+    const rainHp = this.ctx.createBiquadFilter();
+    rainHp.type = 'highpass';
+    rainHp.frequency.value = 900;
+    const rainLp = this.ctx.createBiquadFilter();
+    rainLp.type = 'lowpass';
+    rainLp.frequency.value = 5600;
+    this.rainGain = this.ctx.createGain();
+    this.rainGain.gain.value = 0.0;
+    rainSrc.connect(rainHp);
+    rainHp.connect(rainLp);
+    rainLp.connect(this.rainGain);
+    this.rainGain.connect(this.masterGain);
+    rainSrc.start();
+
+    // 4. Pássaros distantes
     const triggerBird = () => {
       if (this.enabled && this.ctx && this.ctx.state === 'running') {
         this.playBirdChirp();
@@ -89,13 +108,14 @@ export class ForestAudio {
     this.birdTimer = setTimeout(triggerBird, 1200);
   }
 
-  update(windStrength, distToStream, time) {
+  update(windStrength, distToStream, time, rain = 0) {
     if (!this.ctx || !this.enabled) return;
     const gust = 0.5 + 0.5 * Math.sin(time * 0.35) * Math.cos(time * 0.17);
     const freq = 220 + windStrength * 290 + gust * 190;
     const vol = 0.14 + windStrength * 0.36 + gust * 0.12;
     this.windFilter.frequency.setTargetAtTime(freq, this.ctx.currentTime, 0.2);
     this.windGain.gain.setTargetAtTime(vol, this.ctx.currentTime, 0.2);
+    this.rainGain.gain.setTargetAtTime(rain * 0.40, this.ctx.currentTime, 0.35);
 
     // Volume do rio aumenta quando o jogador se aproxima da água
     const streamProximity = Math.exp(-Math.max(0, distToStream - 3.0) * 0.09);

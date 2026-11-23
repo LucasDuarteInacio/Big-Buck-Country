@@ -6,7 +6,7 @@
 // por frame não vem delas: o renderer só desenha as células visíveis, com
 // copa em detalhe cheio até treeDetailDist (m), copa de cartões planos até
 // treeLodDist — além disso a árvore vira o LOD distante — e sub-bosque
-// (samambaia, grama, cogumelos) até understoryDist
+// (samambaia, grama, arbusto, junco, taioba, cogumelos) até understoryDist
 export const QUALITY_PRESETS = {
   medium: {
     label: 'Médio',
@@ -19,11 +19,15 @@ export const QUALITY_PRESETS = {
     redFoliageClusters: 4200,
     foliageClusters: 168000,
     ferns: 200000,
+    bushes: 55000,
+    broadleafs: 70000,
     grassTufts: 320000,
+    reeds: 45000,
     rocks: 2400,
     fallenLogs: 1500,
     mushrooms: 13500,
     spores: 3400,
+    rainDrops: 3200,
     treeDetailDist: 50,
     treeLodDist: 150,
     understoryDist: 70
@@ -39,11 +43,15 @@ export const QUALITY_PRESETS = {
     redFoliageClusters: 8000,
     foliageClusters: 288000,
     ferns: 320000,
+    bushes: 90000,
+    broadleafs: 115000,
     grassTufts: 520000,
+    reeds: 70000,
     rocks: 3800,
     fallenLogs: 2500,
     mushrooms: 27500,
     spores: 6000,
+    rainDrops: 5600,
     treeDetailDist: 65,
     treeLodDist: 220,
     understoryDist: 95
@@ -59,11 +67,15 @@ export const QUALITY_PRESETS = {
     redFoliageClusters: 13000,
     foliageClusters: 384000,
     ferns: 420000,
+    bushes: 125000,
+    broadleafs: 155000,
     grassTufts: 700000,
+    reeds: 95000,
     rocks: 5200,
     fallenLogs: 3300,
     mushrooms: 39000,
     spores: 9000,
+    rainDrops: 8800,
     treeDetailDist: 85,
     treeLodDist: 280,
     understoryDist: 120
@@ -79,11 +91,15 @@ export const QUALITY_PRESETS = {
     redFoliageClusters: 19200,
     foliageClusters: 480000,
     ferns: 520000,
+    bushes: 160000,
+    broadleafs: 200000,
     grassTufts: 900000,
+    reeds: 125000,
     rocks: 6500,
     fallenLogs: 4200,
     mushrooms: 52000,
     spores: 12500,
+    rainDrops: 12000,
     treeDetailDist: 105,
     treeLodDist: 340,
     understoryDist: 145

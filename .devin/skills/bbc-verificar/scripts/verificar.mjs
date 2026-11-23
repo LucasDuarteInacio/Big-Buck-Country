@@ -50,7 +50,7 @@ if (!args.estatico && stat.errors.some((e) => e.startsWith('Sintaxe inválida'))
         const $ = (id) => document.getElementById(id);
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));
         const fails = [];
-        for (const id of ['viewport', 'api-pill', 'seed-badge', 'fps-counter', 'btn-toggle-hud', 'controls-panel', 'slider-time', 'slider-fog', 'slider-wind', 'btn-regen', 'btn-tour', 'btn-audio', 'btn-download-zip', 'val-instances']) {
+        for (const id of ['viewport', 'api-pill', 'seed-badge', 'fps-counter', 'btn-toggle-hud', 'controls-panel', 'slider-time', 'slider-fog', 'slider-wind', 'btn-regen', 'btn-audio', 'btn-download-zip', 'val-instances', 'crosshair']) {
           if (!$(id)) fails.push('elemento #' + id + ' sumiu do index.html');
         }
         if (fails.length) return { fails };
@@ -64,10 +64,14 @@ if (!args.estatico && stat.errors.some((e) => e.startsWith('Sintaxe inválida'))
         slide('slider-time', '0.5', 'val-time', 'timeOfDay');
         slide('slider-fog', '0.9', 'val-fog', 'fogDensity');
         slide('slider-wind', '1.2', 'val-wind', 'windStrength');
-        const tour = $('tour-label').textContent;
-        $('btn-tour').click();
-        if ($('tour-label').textContent === tour) fails.push('botão "Câmera Livre"/passeio não alternou');
-        $('btn-tour').click();
+        const modes = document.querySelectorAll('.mode-btn');
+        if (modes.length !== 3) fails.push('esperava 3 botões de modo (.mode-btn)');
+        else {
+          document.querySelector('.mode-btn[data-mode="jogo"]').click();
+          if (app.camMode !== 'jogo' || $('crosshair').classList.contains('hidden')) fails.push('botão "Jogo" não ativou camMode/mira');
+          document.querySelector('.mode-btn[data-mode="livre"]').click();
+          if (app.camMode !== 'livre') fails.push('botão "Livre" não voltou o camMode');
+        }
         if (document.querySelectorAll('.q-btn').length !== 4) fails.push('esperava 4 botões de qualidade (.q-btn)');
         await wait(3500);
         return { fails, fps: $('fps-counter').textContent, instances: $('val-instances').textContent, seed: $('seed-badge').textContent, scale: app.renderScale };

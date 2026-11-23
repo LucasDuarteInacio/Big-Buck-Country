@@ -18,18 +18,25 @@ O custo por frame é controlado por LOD de instâncias: o renderer só desenha a
 
 Pipeline de renderização: PBR Cook-Torrance GGX, shadow mapping com PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens, estrelas, God Rays, SSAO e Bloom HDR — tudo em WGSL.
 
+Há três modos de câmera (`camMode` em `BigBuckApp`, seletor `.mode-btn` no HUD): `livre` (anda + voa com Espaço/C), `passeio` (órbita automática) e `jogo` (primeira pessoa no chão, Espaço pula). No modo jogo as mãos do jogador aparecem: `buildHandsMesh()` (world.js, matId 12) é desenhada num passe próprio ao fim do HDR (`handsPipeline`, vertex `vsHands`), com depth dedicado (`handsDepthView`) para nunca afundar no cenário; a pose vem do uniform `handsMat` (base da câmera + sway/bob), calculado no `loop`.
+
+O mesh das mãos é o modelo **'WRAD ARMS' por wriks (CC0 1.0)** — https://wriks.itch.io/wrad-arms — assado em `src/hands.js` por `tools/bake-maos.mjs` a partir de `assets/wrad/` (glb + albedo + licença). O arquivo gerado guarda posições/normais/uvs no espaço glTF cru (-z frente) e a cor por vértice assada do albedo; `buildHandsMesh()` aplica a conversão p/ viewmodel (giro 180° em y + pitch `a` + escala/offset `s`/`ox`/`oy`/`oz`) e tem fallback procedural se `HANDS_MODEL` faltar. Regenerar: `node tools/bake-maos.mjs`.
+
 ## Estrutura de Arquivos
 
 | Arquivo | Responsabilidade |
 |---|---|
 | `index.html` | HUD (Tailwind CDN), canvas e entry point `<script type="module">` que importa `BigBuckApp` e carrega os fontes para o exportador ZIP |
 | `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom post) + `BigBuckApp` (orquestração, câmera, input, UI, loop). Também contém `downloadModularZip`, o exportador `.zip` do projeto |
-| `src/world.js` | `ForestWorld` — geração procedural: heightmap da ilha, construtores de mesh (`buildTerrainMesh`, `buildTreeTrunkMesh`, `buildCanopyClusterMesh`, `buildFernMesh`, `buildGrassMesh`, `buildRockMesh`, `buildFallenLogMesh`, `buildMushroomMesh`, `buildWaterMesh`) e `generateInstances(preset)` |
+| `src/world.js` | `ForestWorld` — geração procedural: heightmap da ilha, construtores de mesh (`buildTerrainMesh`, `buildTreeTrunkMesh`, `buildCanopyClusterMesh`, `buildFernMesh`, `buildGrassMesh`, `buildBushMesh`, `buildReedMesh`, `buildBroadleafMesh`, `buildRockMesh`, `buildFallenLogMesh`, `buildMushroomMesh`, `buildWaterMesh`) e `generateInstances(preset)` |
 | `src/island.js` | Planta da ilha: `WORLD_SIZE`, `ISLAND` (costa, espinha do maciço, rios), `coastRadius`/`mountSdf`/`riverDist`/`riverPoint`, `ISLAND_SPAWN` e o espelho `ISLAND_WGSL` interpolado em `WGSL_SHADERS` |
 | `src/shaders.js` | `WGSL_SHADERS` (pipeline principal) e `WGSL_POST_SHADERS` (pós-processamento) como template literals WGSL |
 | `src/math.js` | `PRNG` (determinístico), `ProceduralNoise` (value noise, FBM, ridge) e `Mat4` |
 | `src/quality.js` | `QUALITY_PRESETS`: `medium`, `high`, `ultra`, `cinematic` — dpr, `shadowRes`, `godRaySteps`, `terrainRes`, contagens de instâncias e distâncias de LOD (`treeDetailDist`/`treeLodDist`/`understoryDist`) |
 | `src/audio.js` | `ForestAudio` — sintetizador procedural Web Audio |
+| `src/hands.js` | **Gerado** — mesh das mãos em primeira pessoa (`HANDS_MODEL`: 'WRAD ARMS' por wriks, CC0) |
+| `assets/wrad/` | Fonte do modelo das mãos (glb, albedo, licença) |
+| `tools/bake-maos.mjs` | Conversor `assets/wrad/arms.glb` + albedo → `src/hands.js` |
 | `textures/` | Texturas fotográficas do pacote de mídia do Shadertoy (bark, rock, pebbles, noise, stars) — **CC BY-NC-SA 3.0**, © shadertoy.com |
 | `screenshots/` | Capturas do mundo atual usadas no `README.md` |
 | `godot/` | Port em progresso para Godot 4 + C# (mesma seed, mesma ilha) — tem o próprio `README.md` |

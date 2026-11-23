@@ -37,7 +37,10 @@ const INSTANCE_LAYERS = [
   ['canopyCMid', 'canopiesC', 'foliage', 'mid', true],
   ['canopyCFar', 'canopiesCFar', 'foliage', 'far', false],
   ['fern', 'ferns', 'foliage', 'under', false],
-  ['grass', 'grasses', 'foliage', 'under', false]
+  ['grass', 'grasses', 'foliage', 'under', false],
+  ['bush', 'bushes', 'foliage', 'under', false],
+  ['reed', 'reeds', 'foliage', 'under', false],
+  ['broadleaf', 'broadleafs', 'foliage', 'under', false]
 ];
 
 // Planos normalizados (a,b,c,d) de uma view-projection WebGPU (z de 0 a 1)
@@ -73,12 +76,14 @@ class WebGPURenderer {
     this.shadowRes = 2048;
   }
 
-  async init(shadowRes = 2048) {
+  async init(shadowRes = 2048, onProgress = null) {
     if (!navigator.gpu) return false;
     try {
+      onProgress?.(0.05, 'Solicitando GPU…');
       const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) return false;
       this.device = await adapter.requestDevice();
+      onProgress?.(0.15, 'Configurando canvas…');
       this.context = this.canvas.getContext('webgpu');
       this.format = navigator.gpu.getPreferredCanvasFormat();
       this.context.configure({
@@ -87,8 +92,11 @@ class WebGPURenderer {
         alphaMode: 'opaque'
       });
       this.shadowRes = shadowRes;
-      await this.loadTextures();
+      await this.loadTextures((f) => onProgress?.(0.15 + f * 0.6, 'Carregando texturas…'));
+      onProgress?.(0.8, 'Compilando shaders…');
+      await new Promise(r => requestAnimationFrame(r));
       this.createPipelines();
+      onProgress?.(1);
       return true;
     } catch (e) {
       console.warn('WebGPU indisponível:', e);
@@ -96,15 +104,16 @@ class WebGPURenderer {
     }
   }
 
-  async loadTextures() {
+  async loadTextures(onProgress = null) {
     // Texturas fotográficas do pacote de mídia do Shadertoy (espelhadas localmente)
     const files = [
-      'textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png', 'textures/stars.jpg',
+      'textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png',
       'textures/litter.jpg', 'textures/wetstones.jpg', 'textures/twigs.jpg', 'textures/bark2.jpg',
       'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg', 'textures/sand.png'
     ];
     this.textureViews = [];
-    for (const f of files) {
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
       try {
         const bmp = await createImageBitmap(await (await fetch(f)).blob(), { colorSpaceConversion: 'none' });
         const tex = this.device.createTexture({
@@ -119,6 +128,7 @@ class WebGPURenderer {
         this.device.queue.writeTexture({ texture: tex }, new Uint8Array([110, 110, 110, 255]), {}, [1, 1]);
         this.textureViews.push(tex.createView());
       }
+      onProgress?.((i + 1) / files.length);
     }
     this.texSampler = this.device.createSampler({
       magFilter: 'linear', minFilter: 'linear',
@@ -131,7 +141,7 @@ class WebGPURenderer {
     const mainMod = dev.createShaderModule({ code: WGSL_SHADERS });
     const postMod = dev.createShaderModule({ code: WGSL_POST_SHADERS });
 
-    // Frame Uniform Buffer (3 * mat4(192) + 8 * vec4(128) = 320 bytes -> 512 alinhado)
+    // Frame Uniform Buffer (4 * mat4(256) + 8 * vec4(128) = 384 bytes -> 512 alinhado)
     this.uniformBuffer = dev.createBuffer({
       size: 512,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -159,7 +169,6 @@ class WebGPURenderer {
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-        { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
         { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -283,6 +292,35 @@ class WebGPURenderer {
       depthStencil: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'less' }
     });
 
+    // Mãos em primeira pessoa (modo jogo): mesmos uniforms/fragmento da
+    // cena, mas vértices no espaço do viewmodel transformados pela handsMat
+    this.handsPipeline = dev.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: mainMod, entryPoint: 'vsHands', buffers: [vertexLayout] },
+      fragment: { module: mainMod, entryPoint: 'fsMain', targets: [{ format: hdrFormat }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' }
+    });
+
+    // Chuva: gotas geradas do índice da instância no vsRain — sem vertex buffer
+    this.rainPipeline = dev.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: mainMod, entryPoint: 'vsRain' },
+      fragment: {
+        module: mainMod,
+        entryPoint: 'fsRain',
+        targets: [{
+          format: hdrFormat,
+          blend: {
+            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+          }
+        }]
+      },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'less' }
+    });
+
     // --- POST-PROCESSING PIPELINES (Bloom Extract, Blur H/V, ACES Composite) ---
     this.postBindGroupLayout = dev.createBindGroupLayout({
       entries: [
@@ -322,8 +360,8 @@ class WebGPURenderer {
 
     this.postUniformH = dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.postUniformV = dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    dev.queue.writeBuffer(this.postUniformH, 0, new Float32Array([1.0, 0.0, 1.05, 0.42]));
-    dev.queue.writeBuffer(this.postUniformV, 0, new Float32Array([0.0, 1.0, 1.05, 0.42]));
+    dev.queue.writeBuffer(this.postUniformH, 0, new Float32Array([1.0, 0.0, 0.9, 0.5]));
+    dev.queue.writeBuffer(this.postUniformV, 0, new Float32Array([0.0, 1.0, 0.9, 0.5]));
 
     this.rebuildShadowTexture(this.shadowRes);
   }
@@ -350,16 +388,15 @@ class WebGPURenderer {
         { binding: 4, resource: this.textureViews[1] },
         { binding: 5, resource: this.textureViews[2] },
         { binding: 6, resource: this.textureViews[3] },
-        { binding: 7, resource: this.textureViews[4] },
         { binding: 8, resource: this.texSampler },
-        { binding: 9, resource: this.textureViews[5] },
-        { binding: 10, resource: this.textureViews[6] },
-        { binding: 11, resource: this.textureViews[7] },
-        { binding: 12, resource: this.textureViews[8] },
-        { binding: 13, resource: this.textureViews[9] },
-        { binding: 14, resource: this.textureViews[10] },
-        { binding: 15, resource: this.textureViews[11] },
-        { binding: 16, resource: this.textureViews[12] }
+        { binding: 9, resource: this.textureViews[4] },
+        { binding: 10, resource: this.textureViews[5] },
+        { binding: 11, resource: this.textureViews[6] },
+        { binding: 12, resource: this.textureViews[7] },
+        { binding: 13, resource: this.textureViews[8] },
+        { binding: 14, resource: this.textureViews[9] },
+        { binding: 15, resource: this.textureViews[10] },
+        { binding: 16, resource: this.textureViews[11] }
       ]
     });
   }
@@ -397,7 +434,13 @@ class WebGPURenderer {
       waterIdxCount: meshes.water.indices.length,
 
       sporeInstB: buf(instances.spores, GPUBufferUsage.VERTEX),
-      sporeCount: instances.sporeCount
+      sporeCount: instances.sporeCount,
+
+      rainCount: instances.rainCount,
+
+      handsVB: buf(meshes.hands.vertices, GPUBufferUsage.VERTEX),
+      handsIB: buf(meshes.hands.indices, GPUBufferUsage.INDEX),
+      handsIdxCount: meshes.hands.indices.length
     };
 
     // Camadas instanciadas: os buffers de instância chegam ordenados por
@@ -500,12 +543,18 @@ class WebGPURenderer {
     const bh = Math.max(1, Math.floor(h * 0.5));
 
     if (this.depthTexture) this.depthTexture.destroy();
+    if (this.handsDepthTexture) this.handsDepthTexture.destroy();
     if (this.hdrTexture) this.hdrTexture.destroy();
     if (this.bloomTexA) this.bloomTexA.destroy();
     if (this.bloomTexB) this.bloomTexB.destroy();
 
     this.depthTexture = this.device.createTexture({
       size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
+    // Depth próprio das mãos (modo jogo): o passe limpa e escreve aqui —
+    // o depth da cena segue intacto p/ god rays e SSAO do pós-processamento
+    this.handsDepthTexture = this.device.createTexture({
+      size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT
     });
     this.hdrTexture = this.device.createTexture({
       size: [w, h], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
@@ -518,6 +567,7 @@ class WebGPURenderer {
     });
 
     this.depthView = this.depthTexture.createView();
+    this.handsDepthView = this.handsDepthTexture.createView();
     this.hdrView = this.hdrTexture.createView();
     this.bloomViewA = this.bloomTexA.createView();
     this.bloomViewB = this.bloomTexB.createView();
@@ -573,7 +623,7 @@ class WebGPURenderer {
     });
   }
 
-  render(uniformData, clearColor) {
+  render(uniformData, clearColor, drawHands = false) {
     if (!this.depthTexture || !this.sceneBuffers) return;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
     this.selectCells(uniformData);
@@ -654,7 +704,33 @@ class WebGPURenderer {
       hdrPass.setVertexBuffer(0, sb.sporeInstB);
       hdrPass.draw(6, sb.sporeCount, 0, 0);
     }
+
+    // Chuva (u[59] carrega a intensidade; 0 = passe inteiro pulado)
+    if (sb.rainCount > 0 && uniformData[59] > 0.004) {
+      hdrPass.setPipeline(this.rainPipeline);
+      hdrPass.draw(6, sb.rainCount, 0, 0);
+    }
     hdrPass.end();
+
+    // Mãos em primeira pessoa (modo jogo): passe à parte com depth limpo —
+    // o viewmodel nunca afunda no cenário e entra no mesmo HDR do bloom
+    if (drawHands && sb.handsIdxCount > 0) {
+      const handsPass = encoder.beginRenderPass({
+        colorAttachments: [{ view: this.hdrView, loadOp: 'load', storeOp: 'store' }],
+        depthStencilAttachment: {
+          view: this.handsDepthView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store'
+        }
+      });
+      handsPass.setBindGroup(0, this.mainBindGroup);
+      handsPass.setPipeline(this.handsPipeline);
+      handsPass.setVertexBuffer(0, sb.handsVB);
+      handsPass.setIndexBuffer(sb.handsIB, 'uint32');
+      handsPass.drawIndexed(sb.handsIdxCount, 1, 0, 0, 0);
+      handsPass.end();
+    }
 
     // 3. POST-PROCESSING BLOOM + COMPOSITE
     const extractPass = encoder.beginRenderPass({
@@ -788,11 +864,14 @@ export class BigBuckApp {
     this.audio = new ForestAudio();
 
     this.qualityKey = 'high';
-    this.timeOfDay = 0.22;
+    this.timeOfDay = 0.32;
     this.fogDensity = 0.55;
     this.windStrength = 0.65;
+    this.rainIntensity = 0.0;
     this.camSpeed = 1.0;
-    this.autoTour = false;
+    // Modo de câmera: 'livre' (anda/voa), 'passeio' (órbita auto), 'jogo'
+    // (primeira pessoa no chão, com as mãos do jogador visíveis)
+    this.camMode = 'livre';
 
     // Câmera inicia na margem da clareira olhando rio acima, para o maciço
     // (o ponto de partida vem da planta da ilha — world.spawn)
@@ -807,11 +886,21 @@ export class BigBuckApp {
     this.keys = new Set();
     this.isDragging = false;
     this.lastMouse = [0, 0];
-    this.uniformData = new Float32Array(80); // 320 bytes
+    this.uniformData = new Float32Array(96); // 384 bytes
+
+    // Estado do modo jogo: pulo, e balanço/atraso das mãos (viewmodel)
+    this.onGround = true;
+    this.prevYaw = 0;
+    this.prevPitch = 0;
+    this.handSway = [0, 0];
+    this.handBobPhase = 0;
+    this.handBobAmt = 0;
+    this.handRunAmt = 0;
 
     this.projMat = Mat4.create();
     this.viewMat = Mat4.create();
     this.vpMat = Mat4.create();
+    this.handsMat = Mat4.create();
     this.invVpMat = Mat4.create();
     this.lightProj = Mat4.create();
     this.lightView = Mat4.create();
@@ -825,22 +914,41 @@ export class BigBuckApp {
     // sustentar >=30 FPS e devolve a resolução total quando a GPU folga
     this.renderScale = 1.0;
     this.upscaleStreak = 0;
+
+    // Sequência do rebuild: trocas de qualidade/semente rápidas abortam
+    // um rebuild anterior ainda em andamento (que cede frames ao overlay)
+    this.rebuildSeq = 0;
+  }
+
+  // Alimenta a barra de carregamento do overlay de intro; vira no-op
+  // quando o overlay já foi removido (rebuilds depois de entrar no mundo)
+  setLoading(frac, label) {
+    const bar = document.getElementById('load-bar');
+    if (!bar) return;
+    const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+    bar.style.width = `${pct}%`;
+    document.getElementById('load-pct').textContent = `${pct}%`;
+    if (label) document.getElementById('backend-text-intro').textContent = label;
   }
 
   async bootstrap() {
     const preset = QUALITY_PRESETS[this.qualityKey];
     this.renderer = new WebGPURenderer(this.canvas);
-    if (!(await this.renderer.init(preset.shadowRes))) {
+    this.setLoading(0.02, 'Inicializando motor…');
+    if (!(await this.renderer.init(preset.shadowRes, (f, label) => this.setLoading(0.02 + f * 0.48, label)))) {
       this.renderer = null;
       document.getElementById('backend-text-intro').textContent = 'WebGPU indisponível neste navegador — use Chrome, Edge ou Safari 18+';
       document.getElementById('api-pill').textContent = 'Sem WebGPU';
+      document.getElementById('load-wrap').classList.add('hidden');
+      document.getElementById('btn-enter').classList.remove('hidden');
       return;
     }
 
-    document.getElementById('backend-text-intro').textContent = 'Motor WebGPU HDR • Sombras & PBR Ativos';
     document.getElementById('api-pill').textContent = this.renderer.api;
 
-    this.rebuildWorld();
+    await this.rebuildWorld();
+    this.setLoading(1, 'Motor WebGPU HDR • Sombras & PBR Ativos');
+    document.getElementById('btn-enter').classList.remove('hidden');
     this.handleResize();
     this.bindUI();
 
@@ -848,33 +956,56 @@ export class BigBuckApp {
     requestAnimationFrame((t) => this.loop(t));
   }
 
-  rebuildWorld() {
+  // Monta os meshes um por vez cedendo um frame entre eles, para a barra
+  // de carregamento do overlay avançar em vez de travar num bloco síncrono
+  async rebuildWorld() {
     const preset = QUALITY_PRESETS[this.qualityKey];
-    const meshes = {
-      terrain: this.world.buildTerrainMesh(preset.terrainRes),
-      water: this.world.buildWaterMesh(24),
-      trunkA: this.world.buildTreeTrunkMesh(0),
-      trunkB: this.world.buildTreeTrunkMesh(1),
-      trunkAFar: this.world.buildTreeTrunkMesh(0, 1),
-      trunkBFar: this.world.buildTreeTrunkMesh(1, 1),
-      canopyA: this.world.buildCanopyClusterMesh(0),
-      canopyB: this.world.buildCanopyClusterMesh(1),
-      canopyAMid: this.world.buildCanopyClusterMesh(0, 1),
-      canopyBMid: this.world.buildCanopyClusterMesh(1, 1),
-      canopyAFar: this.world.buildCanopyClusterMesh(0, 2),
-      canopyBFar: this.world.buildCanopyClusterMesh(1, 2),
-      trunkC: this.world.buildTreeTrunkMesh(2),
-      trunkCFar: this.world.buildTreeTrunkMesh(2, 1),
-      canopyC: this.world.buildCanopyClusterMesh(2),
-      canopyCMid: this.world.buildCanopyClusterMesh(2, 1),
-      canopyCFar: this.world.buildCanopyClusterMesh(2, 2),
-      fern: this.world.buildFernMesh(),
-      grass: this.world.buildGrassMesh(),
-      rock: this.world.buildRockMesh(),
-      log: this.world.buildFallenLogMesh(),
-      mushroom: this.world.buildMushroomMesh()
-    };
+    const seq = ++this.rebuildSeq;
+    const tick = () => new Promise(r => requestAnimationFrame(r));
+    const steps = [
+      ['terrain',    () => this.world.buildTerrainMesh(preset.terrainRes)],
+      ['water',      () => this.world.buildWaterMesh(24)],
+      ['trunkA',     () => this.world.buildTreeTrunkMesh(0)],
+      ['trunkB',     () => this.world.buildTreeTrunkMesh(1)],
+      ['trunkAFar',  () => this.world.buildTreeTrunkMesh(0, 1)],
+      ['trunkBFar',  () => this.world.buildTreeTrunkMesh(1, 1)],
+      ['canopyA',    () => this.world.buildCanopyClusterMesh(0)],
+      ['canopyB',    () => this.world.buildCanopyClusterMesh(1)],
+      ['canopyAMid', () => this.world.buildCanopyClusterMesh(0, 1)],
+      ['canopyBMid', () => this.world.buildCanopyClusterMesh(1, 1)],
+      ['canopyAFar', () => this.world.buildCanopyClusterMesh(0, 2)],
+      ['canopyBFar', () => this.world.buildCanopyClusterMesh(1, 2)],
+      ['trunkC',     () => this.world.buildTreeTrunkMesh(2)],
+      ['trunkCFar',  () => this.world.buildTreeTrunkMesh(2, 1)],
+      ['canopyC',    () => this.world.buildCanopyClusterMesh(2)],
+      ['canopyCMid', () => this.world.buildCanopyClusterMesh(2, 1)],
+      ['canopyCFar', () => this.world.buildCanopyClusterMesh(2, 2)],
+      ['fern',       () => this.world.buildFernMesh()],
+      ['grass',      () => this.world.buildGrassMesh()],
+      ['bush',       () => this.world.buildBushMesh()],
+      ['reed',       () => this.world.buildReedMesh()],
+      ['broadleaf',  () => this.world.buildBroadleafMesh()],
+      ['rock',       () => this.world.buildRockMesh()],
+      ['log',        () => this.world.buildFallenLogMesh()],
+      ['mushroom',   () => this.world.buildMushroomMesh()],
+      ['hands',      () => this.world.buildHandsMesh()]
+    ];
+    this.setLoading(0.5, 'Construindo o mundo…');
+    const meshes = {};
+    for (let i = 0; i < steps.length; i++) {
+      const [name, build] = steps[i];
+      meshes[name] = build();
+      this.setLoading(0.5 + 0.35 * (i + 1) / steps.length);
+      await tick();
+      if (seq !== this.rebuildSeq) return;
+    }
+    this.setLoading(0.88, 'Plantando a floresta…');
+    await tick();
+    if (seq !== this.rebuildSeq) return;
     const instances = this.world.generateInstances(preset);
+    this.setLoading(0.96, 'Enviando para a GPU…');
+    await tick();
+    if (seq !== this.rebuildSeq) return;
     this.renderer.uploadScene(meshes, instances, preset.shadowRes);
     document.getElementById('val-instances').textContent = `${preset.label} (${instances.trunkACount + instances.trunkBCount + instances.trunkCCount} árvores)`;
     document.getElementById('seed-badge').textContent = `#${this.world.seed}`;
@@ -921,18 +1052,19 @@ export class BigBuckApp {
     // Download Projeto Modular (.zip)
     document.getElementById('btn-download-zip').addEventListener('click', async () => {
       const zipFiles = {
-        'README.md': `# Big Buck Country — Ultra-Realistic WebGPU Procedural Forest\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/island.js\`: Planta da ilha — contorno da costa, espinha do maciço central e rede de rios (compartilhada entre o relevo e o shader de água)\n- \`src/world.js\`: Gerador procedural da ilha — maciço central (cristas erodidas por fbm com derivada (fdlyW4 do iq), scree ocre, cumes nevados) cercado de floresta, rios que descem até o mar e praia em toda a volta\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
+        'README.md': `# Big Buck Country — Ultra-Realistic WebGPU Procedural Forest\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/island.js\`: Planta da ilha — contorno da costa, espinha do maciço central e rede de rios (compartilhada entre o relevo e o shader de água)\n- \`src/world.js\`: Gerador procedural da ilha — maciço central (cristas erodidas por fbm com derivada (fdlyW4 do iq), scree ocre, cumes nevados) cercado de floresta, rios que descem até o mar e praia em toda a volta\n- \`src/hands.js\`: Modelo das mãos em primeira pessoa (modo jogo) — 'WRAD ARMS' por wriks, CC0 1.0, gerado por tools/bake-maos.mjs\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
         'index.html': this.rawModulesSource['index.html'],
         'src/math.js': this.rawModulesSource['math.js'],
         'src/quality.js': this.rawModulesSource['quality.js'],
         'src/island.js': this.rawModulesSource['island.js'],
         'src/world.js': this.rawModulesSource['world.js'],
+        'src/hands.js': this.rawModulesSource['hands.js'],
         'src/shaders.js': this.rawModulesSource['shaders.js'],
         'src/audio.js': this.rawModulesSource['audio.js'],
         'src/main.js': this.rawModulesSource['main.js']
       };
       // Inclui as texturas fotográficas (pacote de mídia do Shadertoy, CC BY-NC-SA)
-      for (const t of ['textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png', 'textures/stars.jpg',
+      for (const t of ['textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png',
                        'textures/litter.jpg', 'textures/wetstones.jpg', 'textures/twigs.jpg', 'textures/bark2.jpg',
                        'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg', 'textures/sand.png']) {
         try { zipFiles[t] = new Uint8Array(await (await fetch(t)).arrayBuffer()); } catch (e) { /* servidor sem a pasta textures */ }
@@ -944,7 +1076,7 @@ export class BigBuckApp {
       if (e.code === 'Space') e.preventDefault();
       this.keys.add(e.code);
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
-        if (this.autoTour) this.setAutoTour(false);
+        if (this.camMode === 'passeio') this.setCamMode('livre');
       }
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
@@ -959,14 +1091,14 @@ export class BigBuckApp {
       if (document.pointerLockElement === this.canvas) {
         this.cam.yaw -= e.movementX * 0.0022;
         this.cam.pitch = Math.max(-1.42, Math.min(1.42, this.cam.pitch - e.movementY * 0.0022));
-        if (this.autoTour) this.setAutoTour(false);
+        if (this.camMode === 'passeio') this.setCamMode('livre');
       } else if (this.isDragging) {
         const dx = e.clientX - this.lastMouse[0];
         const dy = e.clientY - this.lastMouse[1];
         this.lastMouse = [e.clientX, e.clientY];
         this.cam.yaw -= dx * 0.004;
         this.cam.pitch = Math.max(-1.42, Math.min(1.42, this.cam.pitch - dy * 0.004));
-        if (this.autoTour) this.setAutoTour(false);
+        if (this.camMode === 'passeio') this.setCamMode('livre');
       }
     });
 
@@ -989,7 +1121,7 @@ export class BigBuckApp {
         this.lastMouse = [e.touches[0].clientX, e.touches[0].clientY];
         this.cam.yaw -= dx * 0.005;
         this.cam.pitch = Math.max(-1.42, Math.min(1.42, this.cam.pitch - dy * 0.005));
-        if (this.autoTour) this.setAutoTour(false);
+        if (this.camMode === 'passeio') this.setCamMode('livre');
       }
     }, { passive: true });
     this.canvas.addEventListener('touchend', () => { this.isDragging = false; });
@@ -1006,14 +1138,15 @@ export class BigBuckApp {
     const timeSlider = document.getElementById('slider-time');
     const timeLabel = document.getElementById('val-time');
     const updateTimeLabel = (v) => {
-      const totalMins = Math.floor((6 + v * 15) * 60);
+      const totalMins = Math.floor(v * 24 * 60);
       const hh = String(Math.floor(totalMins / 60) % 24).padStart(2, '0');
       const mm = String(totalMins % 60).padStart(2, '0');
       let period = 'Zênite Esmeralda';
-      if (v < 0.18) period = 'Alvorecer';
-      else if (v < 0.36) period = 'Manhã Dourada';
-      else if (v < 0.68) period = 'Zênite Esmeralda';
-      else if (v < 0.84) period = 'Crepúsculo';
+      if (v < 0.20) period = 'Noite Bioluminescente';
+      else if (v < 0.29) period = 'Alvorecer';
+      else if (v < 0.46) period = 'Manhã Dourada';
+      else if (v < 0.71) period = 'Zênite Esmeralda';
+      else if (v < 0.79) period = 'Crepúsculo';
       else period = 'Noite Bioluminescente';
       timeLabel.textContent = `${hh}:${mm} (${period})`;
     };
@@ -1026,6 +1159,11 @@ export class BigBuckApp {
     document.getElementById('slider-fog').addEventListener('input', (e) => {
       this.fogDensity = parseFloat(e.target.value);
       document.getElementById('val-fog').textContent = `${Math.round(this.fogDensity * 100)}%`;
+    });
+
+    document.getElementById('slider-rain').addEventListener('input', (e) => {
+      this.rainIntensity = parseFloat(e.target.value);
+      document.getElementById('val-rain').textContent = `${Math.round(this.rainIntensity * 100)}%`;
     });
 
     document.getElementById('slider-wind').addEventListener('input', (e) => {
@@ -1063,8 +1201,8 @@ export class BigBuckApp {
       document.getElementById('audio-label').textContent = active ? 'Som: On' : 'Som: Off';
     });
 
-    document.getElementById('btn-tour').addEventListener('click', () => {
-      this.setAutoTour(!this.autoTour);
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.setCamMode(btn.dataset.mode));
     });
 
     const panel = document.getElementById('controls-panel');
@@ -1075,13 +1213,36 @@ export class BigBuckApp {
     });
   }
 
+  // Troca o modo de câmera e o estado visual dos botões do seletor
+  setCamMode(mode) {
+    this.camMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(b => {
+      const active = b.dataset.mode === mode;
+      b.className = `mode-btn py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${active
+        ? 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/30'
+        : 'text-emerald-100/70 hover:text-white'}`;
+    });
+    const crosshair = document.getElementById('crosshair');
+    if (crosshair) crosshair.classList.toggle('hidden', mode !== 'jogo');
+    if (mode === 'jogo') {
+      // Primeira pessoa: cola no chão e pede o mouse (o clique do botão é o gesto)
+      this.cam.flying = false;
+      this.cam.vel[1] = 0;
+      this.onGround = true;
+      const g = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
+      this.cam.pos[1] = Math.max(g, -2.1) + 1.72;
+      const lock = this.canvas.requestPointerLock?.();
+      if (lock?.catch) lock.catch(() => {});
+    }
+  }
+
+  // Compatibilidade com o script de captura (bbc-captura)
   setAutoTour(enabled) {
-    this.autoTour = enabled;
-    document.getElementById('tour-label').textContent = enabled ? 'Passeio Auto' : 'Câmera Livre';
+    this.setCamMode(enabled ? 'passeio' : 'livre');
   }
 
   updateCamera(dt, elapsedSec) {
-    if (this.autoTour) {
+    if (this.camMode === 'passeio') {
       const angle = elapsedSec * 0.075;
       const radius = 30.0 + Math.sin(elapsedSec * 0.14) * 12.0;
       // O passeio orbita a clareira de partida
@@ -1094,7 +1255,9 @@ export class BigBuckApp {
       return;
     }
 
-    const speed = ((this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? 22.0 : 8.0) * this.camSpeed;
+    const game = this.camMode === 'jogo';
+    const run = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    const speed = (run ? (game ? 11.0 : 22.0) : (game ? 5.6 : 8.0)) * this.camSpeed;
     const forwardX = Math.sin(this.cam.yaw);
     const forwardZ = Math.cos(this.cam.yaw);
     const rightX = Math.cos(this.cam.yaw);
@@ -1121,7 +1284,7 @@ export class BigBuckApp {
     this.cam.pos[0] = Math.max(-limit, Math.min(limit, this.cam.pos[0] + this.cam.vel[0] * dt));
     this.cam.pos[2] = Math.max(-limit, Math.min(limit, this.cam.pos[2] + this.cam.vel[2] * dt));
 
-    if (this.keys.has('Space') || this.keys.has('KeyC')) this.cam.flying = true;
+    if (!game && (this.keys.has('Space') || this.keys.has('KeyC'))) this.cam.flying = true;
 
     const groundY = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
     if (this.cam.flying) {
@@ -1139,23 +1302,80 @@ export class BigBuckApp {
         this.cam.flying = false;
         this.cam.vel[1] = 0;
       }
+    } else if (game) {
+      // Modo jogo: primeira pessoa no chão — Espaço pula e a gravidade
+      // derruba de volta (inclusive ao sair correndo de um barranco)
+      const floorY = Math.max(groundY, -2.1) + 1.72;
+      if (this.cam.pos[1] > floorY + 0.08) this.onGround = false;
+      if (this.onGround) {
+        if (this.keys.has('Space')) { this.cam.vel[1] = 4.9; this.onGround = false; }
+        const bob = len > 0.1 ? Math.sin(elapsedSec * 10.5) * 0.05 : 0;
+        this.cam.pos[1] += (floorY + bob - this.cam.pos[1]) * damping;
+      } else {
+        this.cam.vel[1] -= 13.5 * dt;
+        this.cam.pos[1] += this.cam.vel[1] * dt;
+        if (this.cam.pos[1] <= floorY) {
+          this.cam.pos[1] = floorY;
+          this.cam.vel[1] = 0;
+          this.onGround = true;
+        }
+      }
     } else {
       const bob = len > 0.1 ? Math.sin(elapsedSec * 9.5) * 0.055 : 0;
       const targetY = Math.max(groundY, -2.1) + 1.85 + bob;
       this.cam.pos[1] += (targetY - this.cam.pos[1]) * damping;
     }
+
+    // Mãos do modo jogo: atraso de swing no olhar + balanço do passo
+    const dYaw = this.cam.yaw - this.prevYaw;
+    const dPitch = this.cam.pitch - this.prevPitch;
+    this.prevYaw = this.cam.yaw;
+    this.prevPitch = this.cam.pitch;
+    const swayK = Math.min(1, dt * 8.0);
+    this.handSway[0] += (dYaw * 9.0 - this.handSway[0]) * swayK;
+    this.handSway[1] += (-dPitch * 9.0 - this.handSway[1]) * swayK;
+    const hv = Math.hypot(this.cam.vel[0], this.cam.vel[2]);
+    this.handBobPhase += hv * dt * 1.7;
+    this.handBobAmt += ((game && hv > 0.4 ? Math.min(1, hv / 6.0) : 0) - this.handBobAmt) * Math.min(1, dt * 7.0);
+    // Corrida levanta o viewmodel: o toco do antebraço aparece no balanço
+    this.handRunAmt += ((game && hv > 7.0 ? 1 : 0) - this.handRunAmt) * Math.min(1, dt * 6.0);
+  }
+
+  // Coordenadas da ilha: origem no centro, lng = x (leste+), lat = -z (norte+),
+  // em metros. Direção: yaw 0 = sul, bearing = 180 - yaw em graus.
+  updateCoordsPill() {
+    const winds = ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'];
+    const bearing = ((180 - this.cam.yaw * 180 / Math.PI) % 360 + 360) % 360;
+    const wind = winds[Math.round(bearing / 45) % 8];
+    const lat = this.cam.pos[2] * -1, lng = this.cam.pos[0];
+    const latTxt = `${Math.abs(Math.round(lat))} m ${lat >= 0 ? 'N' : 'S'}`;
+    const lngTxt = `${Math.abs(Math.round(lng))} m ${lng >= 0 ? 'L' : 'O'}`;
+    document.getElementById('coords-pill').textContent =
+      `${wind} ${String(Math.round(bearing)).padStart(3, '0')}° · lat ${latTxt} · lng ${lngTxt}`;
   }
 
   computeAtmosphere() {
-    const sunAngle = (this.timeOfDay - 0.1) * Math.PI * 1.15;
+    // Ciclo de 24h: ângulo 0 = nascer (leste) às 6h (t=0.25), zênite ao
+    // meio-dia (t=0.5), poente (oeste) às 18h (t=0.75), meia-noite em t=0/1
+    const sunAngle = (this.timeOfDay - 0.25) * Math.PI * 2.0;
+    // Elevação com sinal: negativo = sol abaixo do horizonte (noite)
     const elevation = Math.sin(sunAngle);
+    // Arco leste→oeste: nasce a leste (+x, ângulo 0), culmina inclinado ao
+    // sul (+z) e põe-se a oeste (-x, ângulo π). Fora de [0, π] o sol está
+    // abaixo do horizonte — é a noite.
     const sunDir = [
-      Math.cos(sunAngle) * 0.72,
-      Math.max(0.08, elevation),
-      Math.sin(sunAngle * 0.7 + 0.4) * 0.68
+      Math.cos(sunAngle),
+      Math.sin(sunAngle) * 0.9075,
+      Math.sin(sunAngle) * 0.42
     ];
-    const sLen = Math.hypot(sunDir[0], sunDir[1], sunDir[2]) || 1;
-    sunDir[0] /= sLen; sunDir[1] /= sLen; sunDir[2] /= sLen;
+    // Lua com a mesma regra, meio ciclo atrasada: nasce a leste quando o
+    // sol se põe a oeste e culmina à meia-noite
+    const moonDir = [-sunDir[0], -sunDir[1], -sunDir[2]];
+    // Fonte de luz efetiva (iluminação + shadow map): sol até o crepúsculo
+    // profundo; abaixo de -0.05 de elevação a lua assume
+    const moonUp = elevation < -0.05;
+    const lightDir = moonUp ? moonDir.slice() : sunDir.slice();
+    lightDir[1] = Math.max(0.015, lightDir[1]);
 
     const dayFactor = Math.max(0, Math.min(1, elevation * 1.45 + 0.15));
     const goldenFactor = Math.exp(-Math.pow((elevation - 0.18) / 0.24, 2.0));
@@ -1167,9 +1387,9 @@ export class BigBuckApp {
     ];
 
     const skyTop = [
-      0.02 + dayFactor * 0.14,
-      0.05 + dayFactor * 0.30,
-      0.09 + dayFactor * 0.26
+      0.02 + dayFactor * 0.08,
+      0.05 + dayFactor * 0.26,
+      0.09 + dayFactor * 0.40
     ];
 
     const skyHorizon = [
@@ -1179,12 +1399,23 @@ export class BigBuckApp {
     ];
 
     const fogColor = [
-      0.03 + dayFactor * 0.15 + goldenFactor * 0.20,
-      0.07 + dayFactor * 0.26 + goldenFactor * 0.12,
-      0.08 + dayFactor * 0.20
+      0.03 + dayFactor * 0.20 + goldenFactor * 0.22,
+      0.07 + dayFactor * 0.25 + goldenFactor * 0.12,
+      0.08 + dayFactor * 0.19
     ];
 
-    return { sunDir, sunColor, skyTop, skyHorizon, fogColor, elevation: Math.max(0, elevation) };
+    // Céu fechado: a chuva mistura a paleta para cinza-chumbo — o sol apaga,
+    // o horizonte fica mais claro que o zênite e a névoa acinzenta
+    const rain = this.rainIntensity;
+    if (rain > 0.001) {
+      const mix3 = (a, b) => [a[0] + (b[0] - a[0]) * rain, a[1] + (b[1] - a[1]) * rain, a[2] + (b[2] - a[2]) * rain];
+      sunColor.splice(0, 3, ...mix3(sunColor, [0.20 + dayFactor * 0.28, 0.23 + dayFactor * 0.30, 0.27 + dayFactor * 0.33]));
+      skyTop.splice(0, 3, ...mix3(skyTop, [0.030 + dayFactor * 0.045, 0.038 + dayFactor * 0.055, 0.048 + dayFactor * 0.065]));
+      skyHorizon.splice(0, 3, ...mix3(skyHorizon, [0.09 + dayFactor * 0.12, 0.10 + dayFactor * 0.13, 0.11 + dayFactor * 0.14]));
+      fogColor.splice(0, 3, ...mix3(fogColor, [0.08 + dayFactor * 0.10, 0.09 + dayFactor * 0.11, 0.10 + dayFactor * 0.12]));
+    }
+
+    return { sunDir, moonDir, lightDir, sunColor, skyTop, skyHorizon, fogColor, elevation };
   }
 
   invertMat4(out, m) {
@@ -1229,6 +1460,7 @@ export class BigBuckApp {
       const fps = Math.round(this.fpsFrames / this.fpsTimer);
       const pct = this.renderScale < 1.0 ? ` · ${Math.round(this.renderScale * 100)}%` : '';
       document.getElementById('fps-counter').textContent = `${fps} FPS${pct}`;
+      this.updateCoordsPill();
       this.fpsFrames = 0;
       this.fpsTimer = 0;
       this.autoScale(fps);
@@ -1236,7 +1468,7 @@ export class BigBuckApp {
 
     this.updateCamera(dt, elapsedSec);
 
-    this.audio.update(this.windStrength, this.world.riverDist(this.cam.pos[0], this.cam.pos[2]), elapsedSec);
+    this.audio.update(this.windStrength, this.world.riverDist(this.cam.pos[0], this.cam.pos[2]), elapsedSec, this.rainIntensity);
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
     Mat4.perspective(this.projMat, (60 * Math.PI) / 180, aspect, 0.2,
@@ -1256,14 +1488,35 @@ export class BigBuckApp {
     Mat4.multiply(this.vpMat, this.projMat, this.viewMat);
     this.invertMat4(this.invVpMat, this.vpMat);
 
+    // Matriz das mãos do modo jogo: colunas = direita/cima/frente da tela
+    // (a base mira-para-trás do lookAt) e origem nos olhos — mais o atraso
+    // do olhar (sway) e o balanço do passo, o típico flutuar de viewmodel
+    const scrRightX = -Math.cos(this.cam.yaw), scrRightZ = Math.sin(this.cam.yaw);
+    const scrUp = [
+      -scrRightZ * lookDir[1],
+      scrRightZ * lookDir[0] - scrRightX * lookDir[2],
+      scrRightX * lookDir[1]
+    ];
+    const handOX = this.handSway[0] * 0.06 + Math.sin(this.handBobPhase) * 0.014 * this.handBobAmt;
+    const handOY = this.handSway[1] * 0.05 - Math.abs(Math.cos(this.handBobPhase)) * 0.011 * this.handBobAmt - this.handBobAmt * 0.004 + this.handRunAmt * 0.09;
+    const handOZ = -0.02 * this.handBobAmt - this.handRunAmt * 0.05;
+    const hm = this.handsMat;
+    hm[0] = scrRightX;   hm[1] = 0;          hm[2] = scrRightZ;   hm[3] = 0;
+    hm[4] = scrUp[0];    hm[5] = scrUp[1];   hm[6] = scrUp[2];    hm[7] = 0;
+    hm[8] = lookDir[0];  hm[9] = lookDir[1]; hm[10] = lookDir[2]; hm[11] = 0;
+    hm[12] = this.cam.pos[0] + scrRightX * handOX + scrUp[0] * handOY + lookDir[0] * handOZ;
+    hm[13] = this.cam.pos[1] + scrUp[1] * handOY + lookDir[1] * handOZ;
+    hm[14] = this.cam.pos[2] + scrRightZ * handOX + scrUp[2] * handOY + lookDir[2] * handOZ;
+    hm[15] = 1;
+
     const atm = this.computeAtmosphere();
 
     // Matriz de Sombra Ortográfica centrada ao redor da câmera
     const shadowExtent = 68.0;
     const lightEye = [
-      this.cam.pos[0] + atm.sunDir[0] * 85.0,
-      atm.sunDir[1] * 85.0,
-      this.cam.pos[2] + atm.sunDir[2] * 85.0
+      this.cam.pos[0] + atm.lightDir[0] * 85.0,
+      atm.lightDir[1] * 85.0,
+      this.cam.pos[2] + atm.lightDir[2] * 85.0
     ];
     const lightTarget = [this.cam.pos[0], 0.0, this.cam.pos[2]];
     Mat4.lookAt(this.lightView, lightEye, lightTarget, [0, 1, 0]);
@@ -1275,17 +1528,18 @@ export class BigBuckApp {
     u.set(this.vpMat, 0);
     u.set(this.invVpMat, 16);
     u.set(this.lightVpMat, 32);
+    u.set(this.handsMat, 80);
 
     u[48] = this.cam.pos[0]; u[49] = this.cam.pos[1]; u[50] = this.cam.pos[2]; u[51] = this.world.seed; // .w: seed p/ hash do leito no shader de água
     u[52] = atm.sunDir[0];   u[53] = atm.sunDir[1];   u[54] = atm.sunDir[2];   u[55] = preset.understoryDist; // .w: alcance do sub-bosque (fade no vsInstanced)
-    u[56] = atm.sunColor[0]; u[57] = atm.sunColor[1]; u[58] = atm.sunColor[2]; u[59] = 1.0;
-    u[60] = atm.skyTop[0];   u[61] = atm.skyTop[1];   u[62] = atm.skyTop[2];   u[63] = 1.0;
-    u[64] = atm.skyHorizon[0]; u[65] = atm.skyHorizon[1]; u[66] = atm.skyHorizon[2]; u[67] = 1.0;
-    u[68] = atm.fogColor[0]; u[69] = atm.fogColor[1]; u[70] = atm.fogColor[2]; u[71] = 1.0;
+    u[56] = atm.sunColor[0]; u[57] = atm.sunColor[1]; u[58] = atm.sunColor[2]; u[59] = this.rainIntensity; // .w: intensidade da chuva
+    u[60] = atm.skyTop[0];   u[61] = atm.skyTop[1];   u[62] = atm.skyTop[2];   u[63] = atm.moonDir[0]; // .w: lua.x
+    u[64] = atm.skyHorizon[0]; u[65] = atm.skyHorizon[1]; u[66] = atm.skyHorizon[2]; u[67] = atm.moonDir[1]; // .w: lua.y
+    u[68] = atm.fogColor[0]; u[69] = atm.fogColor[1]; u[70] = atm.fogColor[2]; u[71] = atm.moonDir[2]; // .w: lua.z
 
     u[72] = elapsedSec;
     u[73] = this.windStrength;
-    u[74] = this.fogDensity;
+    u[74] = this.fogDensity + this.rainIntensity * 0.35; // a chuva engrossa a névoa
     u[75] = atm.elevation;
 
     u[76] = preset.godRaySteps;
@@ -1293,7 +1547,7 @@ export class BigBuckApp {
     u[78] = 0.0028;
     u[79] = aspect;
 
-    this.renderer.render(u, atm.skyHorizon);
+    this.renderer.render(u, atm.skyHorizon, this.camMode === 'jogo');
     requestAnimationFrame((t) => this.loop(t));
   }
 }

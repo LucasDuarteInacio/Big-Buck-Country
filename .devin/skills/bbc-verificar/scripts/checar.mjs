@@ -184,18 +184,20 @@ export async function staticChecks() {
 
   check('camadas de instância (INSTANCE_LAYERS)', () => {
     const rows = [...(between(main, 'const INSTANCE_LAYERS = [', '];') || '').matchAll(/\['(\w+)',\s*'(\w+)',\s*'(\w+)',\s*'(\w+)',\s*(true|false)\]/g)];
-    const meshKeys = [...(between(main, 'const meshes = {', '};') || '').matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+    const meshKeys = [...(between(main, 'const steps = [', '];') || '').matchAll(/\['(\w+)'/g)].map((m) => m[1]);
     const listKeys = [...(between(world, 'const lists = {', '};') || '').matchAll(/(\w+):\s*\[/g)].map((m) => m[1]);
     const tiers = [...(/for \(const tier of \[([^\]]+)\]/.exec(main)?.[1] || '').matchAll(/'(\w+)'/g)].map((m) => m[1]);
-    if (!rows.length || !meshKeys.length || !listKeys.length) { errors.push('Não consegui ler INSTANCE_LAYERS, `meshes` (rebuildWorld) ou `lists` (generateInstances).'); return; }
+    if (!rows.length || !meshKeys.length || !listKeys.length) { errors.push('Não consegui ler INSTANCE_LAYERS, `steps` (rebuildWorld) ou `lists` (generateInstances).'); return; }
     for (const [, mesh, list, pipe, tier] of rows) {
-      if (!meshKeys.includes(mesh)) errors.push(`INSTANCE_LAYERS: mesh '${mesh}' não está no objeto \`meshes\` de rebuildWorld() (main.js).`);
+      if (!meshKeys.includes(mesh)) errors.push(`INSTANCE_LAYERS: mesh '${mesh}' não está no array \`steps\` de rebuildWorld() (main.js).`);
       if (!listKeys.includes(list)) errors.push(`INSTANCE_LAYERS: lista '${list}' não está em \`lists\` de generateInstances() (world.js).`);
       if (!['solid', 'foliage'].includes(pipe)) errors.push(`INSTANCE_LAYERS: pipeline '${pipe}' inválido (use 'solid' ou 'foliage').`);
       if (!tiers.includes(tier)) errors.push(`INSTANCE_LAYERS: faixa '${tier}' inválida (use ${tiers.filter((t) => t !== 'shadow').join(', ')}).`);
     }
     const usedMeshes = rows.map((r) => r[1]), usedLists = rows.map((r) => r[2]);
-    for (const k of meshKeys) if (!['terrain', 'water'].includes(k) && !usedMeshes.includes(k)) warnings.push(`rebuildWorld(): mesh '${k}' é construído mas nenhuma camada de INSTANCE_LAYERS o desenha.`);
+    // 'hands' não é camada instanciada: é o viewmodel do modo jogo, desenhado
+    // num passe próprio pelo handsPipeline
+    for (const k of meshKeys) if (!['terrain', 'water', 'hands'].includes(k) && !usedMeshes.includes(k)) warnings.push(`rebuildWorld(): mesh '${k}' é construído mas nenhuma camada de INSTANCE_LAYERS o desenha.`);
     for (const k of listKeys) if (!usedLists.includes(k)) warnings.push(`generateInstances(): lista '${k}' é gerada mas nenhuma camada de INSTANCE_LAYERS a usa.`);
   });
 

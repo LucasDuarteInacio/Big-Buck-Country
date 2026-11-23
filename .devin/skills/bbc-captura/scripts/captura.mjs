@@ -4,7 +4,7 @@
 // Uso: node .devin/skills/bbc-captura/scripts/captura.mjs --vista=partida
 //      node .devin/skills/bbc-captura/scripts/captura.mjs --pos=212,313 --altura=40 --yaw=3.1 --pitch=-0.3 --hora=0.5
 // Opções: --vista=<nome|todas> --pos=x,z --altura=m --yaw=rad --pitch=rad
-//         --hora=0..1 --nevoa=0..1 --qualidade=medium|high|ultra|cinematic
+//         --hora=0..1 --nevoa=0..1 --chuva=0..1 --qualidade=medium|high|ultra|cinematic
 //         --out=arquivo.png|.jpg --largura=1280 --altura-tela=720 --hud --lista
 // ============================================================================
 
@@ -52,6 +52,7 @@ try {
     v.pitch = num(args.pitch, v.pitch);
     v.hora = num(args.hora, v.hora ?? 0.22);
     v.nevoa = num(args.nevoa, v.nevoa ?? 0.55);
+    v.chuva = num(args.chuva, v.chuva ?? 0);
     const out = args.out && names.length === 1 ? args.out : `/tmp/bbc-${name || 'captura'}.png`;
     const pose = await page.evaluate(`(() => {
       const a = window.bigBuck, v = ${JSON.stringify(v)};
@@ -62,7 +63,7 @@ try {
       a.cam.pos[1] = Math.max(a.world.getTerrainHeight(p[0], p[1]), -2.1) + 1.85 + v.altura;
       a.cam.yaw = v.yaw ?? a.world.spawn.yaw;
       a.cam.pitch = v.pitch ?? 0.06;
-      a.timeOfDay = v.hora; a.fogDensity = v.nevoa;
+      a.timeOfDay = v.hora; a.fogDensity = v.nevoa; a.rainIntensity = v.chuva;
       return { x: a.cam.pos[0], y: a.cam.pos[1], z: a.cam.pos[2], yaw: a.cam.yaw, pitch: a.cam.pitch, chao: a.world.getTerrainHeight(p[0], p[1]), costa: a.world.shoreDist(p[0], p[1]) };
     })()`);
     await sleep(1500);
@@ -70,7 +71,7 @@ try {
     if (out.endsWith('.jpg')) await page.screenshot(out);
     console.log(`${out}`);
     console.log(`  câmera: x=${pose.x.toFixed(1)} y=${pose.y.toFixed(1)} z=${pose.z.toFixed(1)} yaw=${pose.yaw.toFixed(2)} pitch=${pose.pitch.toFixed(2)} · chão ${pose.chao.toFixed(1)} m · ${pose.costa > 0 ? `${pose.costa.toFixed(0)} m terra adentro` : `${(-pose.costa).toFixed(0)} m mar afora`}`);
-    console.log(`  hora ${v.hora} · névoa ${v.nevoa} · brilho ${s.brilho}/255 · contraste ${s.contraste}`);
+    console.log(`  hora ${v.hora} · névoa ${v.nevoa} · chuva ${v.chuva} · brilho ${s.brilho}/255 · contraste ${s.contraste}`);
     console.log(`  cores 3×3: ${s.grade.slice(0, 3).join(' ')} | ${s.grade.slice(3, 6).join(' ')} | ${s.grade.slice(6).join(' ')}`);
   }
   const gpu = await app.readGpu();

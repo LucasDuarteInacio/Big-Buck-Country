@@ -41,7 +41,7 @@ projeta sombra visível.
 | Quero... | Onde |
 |---|---|
 | mais/menos de algo | o campo em `QUALITY_PRESETS` (`quality.js`), nos **4** presets, mantendo a ordem crescente medium < high < ultra < cinematic |
-| mudar onde nasce | o bloco numerado do objeto em `generateInstances` (`world.js`): `1.` árvores+copas, `2.` samambaias, `3.` grama, `4.` rochas, `5.` troncos caídos+cogumelos, `6.` esporos |
+| mudar onde nasce | o bloco numerado do objeto em `generateInstances` (`world.js`): `1.` árvores+copas, `2.` samambaias, `3.` grama, `4.` rochas, `5.` troncos caídos+cogumelos, `6.` esporos, `7.` árvores rubras, `8.` arbustos, `9.` juncos, `10.` taiobas |
 | mudar tamanho/variação | os `rng.range(...)` de escala e tint no `push` do bloco |
 | mudar a forma | o `build*Mesh` correspondente |
 | ver mais longe / mais perto | `treeDetailDist`, `treeLodDist`, `understoryDist` nos 4 presets |
@@ -83,9 +83,9 @@ instância). Reaproveite um `matId` existente sempre que der (3 = folhagem baixa
 const bushes = new InstanceList(preset.bushes);                 // junto das outras listas
 ```
 
-O bloco de colocação vai **depois do bloco `6. Esporos`** e antes de
-`const centerY`. Assim os sorteios novos vêm por último e não mudam a posição de
-tudo o que já existe (o `rng` é uma sequência única):
+O bloco de colocação vai **depois do último bloco numerado** (hoje `10. Taiobas`)
+e antes de `const centerY`. Assim os sorteios novos vêm por último e não mudam a
+posição de tudo o que já existe (o `rng` é uma sequência única):
 
 ```js
 // 7. Arbustos — borda das clareiras
@@ -106,10 +106,10 @@ E registre no objeto `lists`, logo abaixo:
 bushes: [bushes, 'bushCount'],
 ```
 
-**4. Mesh no renderer** — `src/main.js`, objeto `meshes` de `rebuildWorld`:
+**4. Mesh no renderer** — `src/main.js`, array `steps` de `rebuildWorld`:
 
 ```js
-bush: this.world.buildBushMesh(),
+['bush', () => this.world.buildBushMesh()],
 ```
 
 **5. Camada** — `src/main.js`, `INSTANCE_LAYERS`. Sólidos ficam junto dos `solid`,

@@ -38,7 +38,7 @@ sed -n '120,180p' src/world.js         # ler só o trecho
 | Altura do terreno | `src/world.js` | `getTerrainHeight` |
 | Máscaras: costa, maciço, rio, mata | `src/world.js` | `shoreDist`, `mountMask`, `riverMask`, `riverCore`, `forestDensity` |
 | Cor do chão por vértice, máscaras de areia/campo no uv | `src/world.js` | `buildTerrainMesh` |
-| Forma de tronco, copa, samambaia, grama, rocha, tronco caído, cogumelo | `src/world.js` | `buildTreeTrunkMesh`, `buildCanopyClusterMesh`, `buildFernMesh`, `buildGrassMesh`, `buildRockMesh`, `buildFallenLogMesh`, `buildMushroomMesh` |
+| Forma de tronco, copa, samambaia, grama, arbusto, junco, taioba, rocha, tronco caído, cogumelo | `src/world.js` | `buildTreeTrunkMesh`, `buildCanopyClusterMesh`, `buildFernMesh`, `buildGrassMesh`, `buildBushMesh`, `buildReedMesh`, `buildBroadleafMesh`, `buildRockMesh`, `buildFallenLogMesh`, `buildMushroomMesh` |
 | Onde cada coisa é plantada | `src/world.js` | `generateInstances` |
 | Quantidades, resoluções, distâncias de LOD | `src/quality.js` | `QUALITY_PRESETS` |
 | Aparência por material (chão, casca, folha, rocha, água...) | `src/shaders.js` | `fn fsMain` e os ramos `mat == N` |
@@ -98,7 +98,7 @@ Mudou um lado, mude o outro **na mesma edição**. O `checar.mjs` confere quase 
 | `shoreDist` | `islandShore` em `shaders.js` |
 | `ProceduralNoise` (`hash2`, `noise2D`, `fbm`) | `worldHash`, `worldNoise2D`, `worldFbm3` em `shaders.js` |
 | um módulo em `src/` (novo ou renomeado) | array `files` em `index.html` **e** `zipFiles` em `main.js` |
-| um mesh novo | `meshes` em `rebuildWorld`, `INSTANCE_LAYERS`, lista em `generateInstances` |
+| um mesh novo | `steps` em `rebuildWorld`, `INSTANCE_LAYERS`, lista em `generateInstances` |
 | um `matId` novo | ramo `mat == N` no `fsMain` |
 
 ## Regras do projeto (resumo do AGENTS.md)

@@ -5,6 +5,7 @@
 
 import { PRNG, ProceduralNoise } from './math.js';
 import { WORLD_SIZE, ISLAND_SPAWN, coastRadius, mountSdf, riverDist, riverPoint } from './island.js';
+import { HANDS_MODEL } from './hands.js';
 
 const smooth01 = (t) => { const c = Math.min(1, Math.max(0, t)); return c * c * (3.0 - 2.0 * c); };
 
@@ -899,6 +900,184 @@ export class ForestWorld {
     return this.packMesh(positions, normals, colors, uvs, indices, 3.0);
   }
 
+  // Arbusto fechado: moita baixa e arredondada de folhas largas numa cúpula
+  buildBushMesh() {
+    const positions = [];
+    const normals = [];
+    const colors = [];
+    const uvs = [];
+    const indices = [];
+
+    const rng = new PRNG(7703);
+    const leaves = 26;
+    for (let c = 0; c < leaves; c++) {
+      // Cúpula baixa: polar de ~0 (topo) a ~77° (borda), azimute dourado
+      const polar = (1 - (c + 0.5) / leaves) * 1.35 + rng.range(-0.12, 0.12);
+      const azim = c * 2.399963 + rng.range(-0.3, 0.3);
+      const ringR = Math.sin(polar);
+      const R = rng.range(0.30, 0.52);
+      const cx = Math.cos(azim) * ringR * R;
+      const cz = Math.sin(azim) * ringR * R;
+      const cy = 0.08 + Math.cos(polar) * R * 0.92;
+
+      // Normal radial da moita com jitter, quebrando o facetamento da cúpula
+      let nx = Math.cos(azim) * ringR + rng.range(-0.45, 0.45);
+      let ny = Math.cos(polar) + 0.35 + rng.range(-0.3, 0.3);
+      let nz = Math.sin(azim) * ringR + rng.range(-0.45, 0.45);
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+
+      // Base ortonormal do cartão + rotação livre em torno da normal
+      let tx = -nz, ty = 0, tz = nx;
+      const tl = Math.hypot(tx, ty, tz) || 1;
+      tx /= tl; tz /= tl;
+      const bx = ny * tz - nz * ty;
+      const by = nz * tx - nx * tz;
+      const bz = nx * ty - ny * tx;
+      const roll = rng.range(0, Math.PI * 2);
+      const cr = Math.cos(roll), sr = Math.sin(roll);
+      const t2x = tx * cr + bx * sr, t2y = ty * cr + by * sr, t2z = tz * cr + bz * sr;
+      const b2x = -tx * sr + bx * cr, b2y = -ty * sr + by * cr, b2z = -tz * sr + bz * cr;
+
+      const cardScale = rng.range(0.5, 0.8);
+      const shade = 0.72 + cy * 0.7; // miolo sombreado, topo da moita claro
+      const r = (0.07 + rng.range(0, 0.03)) * shade;
+      const g = (0.20 + rng.range(0, 0.06)) * shade;
+      const b = (0.05 + rng.range(0, 0.02)) * shade;
+
+      // Folha larga com dobra em V: 3 vértices por linha, ponta caída
+      const rows = [
+        [-0.30, 0.08, 0.01, 0.00, 0.0],
+        [ 0.05, 0.40, 0.06, 0.01, 0.45],
+        [ 0.42, 0.30, 0.04, -0.02, 0.8],
+        [ 0.62, 0.02, -0.06, -0.06, 1.0]
+      ];
+      const baseV = positions.length / 3;
+      for (const [lz, hw, midY, edgeY, v] of rows) {
+        for (const [lx, ly, u] of [[-hw, edgeY, 0.0], [0.0, midY, 0.5], [hw, edgeY, 1.0]]) {
+          positions.push(
+            cx + (t2x * lx + nx * ly + b2x * lz) * cardScale,
+            cy + (t2y * lx + ny * ly + b2y * lz) * cardScale,
+            cz + (t2z * lx + nz * ly + b2z * lz) * cardScale
+          );
+          normals.push(nx, ny, nz);
+          colors.push(r, g, b);
+          uvs.push(u, v);
+        }
+      }
+      for (let rI = 0; rI < rows.length - 1; rI++) {
+        const a = baseV + rI * 3, b2 = baseV + (rI + 1) * 3;
+        indices.push(a, a + 1, b2, a + 1, b2, b2 + 1, a + 1, a + 2, b2 + 1, a + 2, b2 + 1, b2 + 2);
+      }
+    }
+
+    return this.packMesh(positions, normals, colors, uvs, indices, 3.0);
+  }
+
+  // Junco de brejo: hastes finas e quase eretas, mais altas que a grama
+  buildReedMesh() {
+    const positions = [];
+    const normals = [];
+    const colors = [];
+    const uvs = [];
+    const indices = [];
+
+    const rng = new PRNG(8821);
+    const stalks = 9;
+    for (let b = 0; b < stalks; b++) {
+      const ang = (b / stalks) * Math.PI * 2 + rng.range(-0.35, 0.35);
+      const ox = Math.cos(ang) * rng.range(0.02, 0.12);
+      const oz = Math.sin(ang) * rng.range(0.02, 0.12);
+      const bendX = Math.cos(ang) * rng.range(0.04, 0.16);
+      const bendZ = Math.sin(ang) * rng.range(0.04, 0.16);
+      const h = rng.range(1.05, 1.65);
+      const w = 0.018;
+
+      const px = -Math.sin(ang);
+      const pz = Math.cos(ang);
+      const baseV = positions.length / 3;
+
+      const levels = [
+        { t: 0.0, width: w, y: 0.0, bx: 0, bz: 0 },
+        { t: 0.6, width: w * 0.8, y: h * 0.6, bx: bendX * 0.4, bz: bendZ * 0.4 },
+        { t: 1.0, width: 0.004, y: h, bx: bendX, bz: bendZ }
+      ];
+
+      for (const lv of levels) {
+        for (const side of [-1, 1]) {
+          positions.push(ox + lv.bx + px * lv.width * side, lv.y, oz + lv.bz + pz * lv.width * side);
+          normals.push(0, 1, 0);
+          // Verde-oliva amarelado de brejo, ponta mais seca
+          colors.push(0.14 + lv.t * 0.10, 0.17 + lv.t * 0.16, 0.04 + lv.t * 0.03);
+          uvs.push(side * 0.5 + 0.5, lv.t);
+        }
+      }
+      indices.push(
+        baseV + 0, baseV + 2, baseV + 1,
+        baseV + 1, baseV + 2, baseV + 3,
+        baseV + 2, baseV + 4, baseV + 3,
+        baseV + 3, baseV + 4, baseV + 5
+      );
+    }
+
+    return this.packMesh(positions, normals, colors, uvs, indices, 3.0);
+  }
+
+  // Taioba rasteira: roseta de folhas largas quase horizontais do sub-bosque
+  buildBroadleafMesh() {
+    const positions = [];
+    const normals = [];
+    const colors = [];
+    const uvs = [];
+    const indices = [];
+
+    const rng = new PRNG(9917);
+    const leaves = 7;
+    for (let f = 0; f < leaves; f++) {
+      const angle = (f / leaves) * Math.PI * 2 + rng.range(-0.3, 0.3);
+      const dx = Math.cos(angle);
+      const dz = Math.sin(angle);
+      const px = -dz;
+      const pz = dx;
+      const baseV = positions.length / 3;
+      const len = rng.range(0.45, 0.75);
+      const lift = rng.range(0.55, 1.0); // folhas entre deitadas e semieretas
+
+      const segs = 4;
+      for (let s = 0; s <= segs; s++) {
+        const t = s / segs;
+        const reach = t * len;
+        const archY = Math.sin(t * Math.PI * 0.62) * 0.42 * lift;
+        // Limbo largo no meio, pecíolo e ponta finos
+        const width = (Math.sin(Math.min(t * 1.25, 1.0) * Math.PI) * 0.30 + 0.02) * (len / 0.6);
+
+        const cx = dx * reach;
+        const cz = dz * reach;
+
+        const offsets = [
+          { side: -1, drop: -0.02, u: 0.0 },
+          { side: 0,  drop: 0.03,  u: 0.5 },
+          { side: 1,  drop: -0.02, u: 1.0 }
+        ];
+        for (const o of offsets) {
+          positions.push(cx + px * width * o.side, archY + o.drop, cz + pz * width * o.side);
+          normals.push(dx * 0.2 + px * o.side * 0.3, 0.92, dz * 0.2 + pz * o.side * 0.3);
+          colors.push(0.05 + t * 0.10, 0.18 + t * 0.20, 0.05 + t * 0.05);
+          uvs.push(o.u, t);
+        }
+      }
+
+      for (let s = 0; s < segs; s++) {
+        const r0 = baseV + s * 3;
+        const r1 = baseV + (s + 1) * 3;
+        indices.push(r0, r1, r0 + 1, r0 + 1, r1, r1 + 1);
+        indices.push(r0 + 1, r1 + 1, r0 + 2, r0 + 2, r1 + 1, r1 + 2);
+      }
+    }
+
+    return this.packMesh(positions, normals, colors, uvs, indices, 3.0);
+  }
+
   // Rocha facetada com musgo no topo
   buildRockMesh() {
     const t = (1 + Math.sqrt(5)) / 2;
@@ -1046,6 +1225,144 @@ export class ForestWorld {
     return this.packMesh(positions, normals, colors, uvs, indices, 5.0);
   }
 
+  // Mãos e antebraços do jogador (modo jogo, primeira pessoa): modelados
+  // no espaço do viewmodel — +z na direção do olhar, x direita, y cima,
+  // em metros, origem no olho. O renderer posiciona o mesh pela handsMat.
+  buildHandsMesh() {
+    // Modelo 'WRAD ARMS' (CC0, gerado em src/hands.js): dados glTF crus
+    // (-z frente) — converte p/ +z frente girando 180° em y, escala e
+    // desloca até as mãos fecharem a parte de baixo do quadro
+    if (HANDS_MODEL) {
+      // -z frente → +z frente (giro de 180° em y), pitch pra frente (Rx)
+      // levanta os antebraços e dx desloca cada braço pro centro SEM afinar
+      const s = 0.13, dx = 2.05, ox = 0, oy = -0.29, oz = 0.36, a = -0.85;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const n = HANDS_MODEL.positions.length / 3;
+      const positions = new Float32Array(n * 3), normals = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const xg = HANDS_MODEL.positions[i * 3];
+        const x = -Math.sign(xg) * Math.max(Math.abs(xg) - dx, 0.1) * s;
+        const y =  HANDS_MODEL.positions[i * 3 + 1] * s;
+        const z = -HANDS_MODEL.positions[i * 3 + 2] * s;
+        positions[i * 3]     = x + ox;
+        positions[i * 3 + 1] = y * ca - z * sa + oy;
+        positions[i * 3 + 2] = y * sa + z * ca + oz;
+        const nx = -HANDS_MODEL.normals[i * 3], ny = HANDS_MODEL.normals[i * 3 + 1], nz = -HANDS_MODEL.normals[i * 3 + 2];
+        normals[i * 3]     = nx;
+        normals[i * 3 + 1] = ny * ca - nz * sa;
+        normals[i * 3 + 2] = ny * sa + nz * ca;
+      }
+      // Corta o braço na altura do punho (y glTF): só mãos + toco curto
+      // entram em cena — o corte fica escondido abaixo da borda do quadro
+      const yCut = -2.1, mp = HANDS_MODEL.positions, src = HANDS_MODEL.indices;
+      const indices = new Uint16Array(src.length);
+      let ni = 0;
+      for (let t = 0; t < src.length; t += 3) {
+        if (mp[src[t] * 3 + 1] < yCut && mp[src[t + 1] * 3 + 1] < yCut && mp[src[t + 2] * 3 + 1] < yCut) {
+          indices[ni++] = src[t]; indices[ni++] = src[t + 1]; indices[ni++] = src[t + 2];
+        }
+      }
+      return this.packMesh(positions, normals, HANDS_MODEL.colors, HANDS_MODEL.uvs, indices.subarray(0, ni), 12.0);
+    }
+
+    const positions = [], normals = [], colors = [], uvs = [], indices = [];
+
+    const SKIN = [0.47, 0.30, 0.21];
+    const SLEEVE = [0.09, 0.12, 0.06];
+
+    // Tubo ao longo de uma polilinha (braço, dedos): anéis perpendiculares
+    // à tangente local; squash achata a seção no eixo "vertical" do anel
+    const tube = (pts, radii, squashIn, colAt, radSegs = 7) => {
+      const n = pts.length, base = positions.length / 3;
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+        let dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+        const dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
+        // Base do anel (e1×e2 = -tangente, mesma convenção dos troncos)
+        let e1x = -dz, e1y = 0, e1z = dx; // dir × ŷ
+        let e1l = Math.hypot(e1x, e1z);
+        if (e1l < 0.05) { e1x = -dy; e1y = 0; e1z = 0; e1l = Math.abs(dy) || 1; } // dir ≈ vertical → dir × x̂
+        e1x /= e1l; e1z /= e1l;
+        const e2x = e1y * dz - e1z * dy, e2y = e1z * dx - e1x * dz, e2z = e1x * dy - e1y * dx; // e1 × dir
+        const r = radii[i], c = colAt(i);
+        const squash = Array.isArray(squashIn) ? squashIn[i] : squashIn;
+        for (let s = 0; s <= radSegs; s++) {
+          const u = s / radSegs, th = u * Math.PI * 2;
+          const co = Math.cos(th), si = Math.sin(th);
+          positions.push(p[0] + (e1x * co + e2x * si * squash) * r,
+                         p[1] + (e1y * co + e2y * si * squash) * r,
+                         p[2] + (e1z * co + e2z * si * squash) * r);
+          normals.push(e1x * co + e2x * si, e1y * co + e2y * si, e1z * co + e2z * si);
+          colors.push(c[0], c[1], c[2]);
+          uvs.push(u, i / (n - 1));
+        }
+      }
+      const stride = radSegs + 1;
+      for (let i = 0; i < n - 1; i++) {
+        for (let s = 0; s < radSegs; s++) {
+          const a = base + i * stride + s, b = a + 1, c = a + stride, d = c + 1;
+          indices.push(a, c, b, b, c, d);
+        }
+      }
+    };
+
+    for (const side of [-1, 1]) {
+      // Antebraço + palma num tubo só: manga escura até o punho, seção
+      // achatada na palma, fechando na linha dos dedos
+      tube(
+        [
+          [side * 0.360, -0.460, -0.10],
+          [side * 0.335, -0.360, 0.10],
+          [side * 0.280, -0.275, 0.30],
+          [side * 0.215, -0.220, 0.46],
+          [side * 0.180, -0.195, 0.54],
+          [side * 0.170, -0.185, 0.615],
+          [side * 0.166, -0.198, 0.656],
+          [side * 0.164, -0.212, 0.664]
+        ],
+        [0.056, 0.052, 0.044, 0.030, 0.033, 0.044, 0.036, 0.003],
+        [1.0, 1.0, 0.95, 0.85, 0.60, 0.50, 0.58, 0.7],
+        (i) => (i < 3 ? SLEEVE : SKIN),
+        8
+      );
+      // Quatro dedos curvados para baixo + polegar na lateral interna
+      const fingerX = [-0.031, -0.010, 0.011, 0.030];
+      const fingerLen = [0.082, 0.094, 0.088, 0.070];
+      for (let f = 0; f < 4; f++) {
+        const fx = side * (0.164 + fingerX[f]);
+        const l = fingerLen[f];
+        tube(
+          [
+            [fx, -0.190, 0.625],
+            [fx, -0.172, 0.640 + l * 0.55],
+            [fx, -0.184, 0.645 + l * 0.92],
+            [fx, -0.204, 0.645 + l]
+          ],
+          [0.0145, 0.0125, 0.0105, 0.001],
+          0.85,
+          () => SKIN,
+          6
+        );
+      }
+      tube(
+        [
+          [side * 0.140, -0.190, 0.500],
+          [side * 0.108, -0.172, 0.565],
+          [side * 0.096, -0.178, 0.625],
+          [side * 0.098, -0.194, 0.648]
+        ],
+        [0.0150, 0.0130, 0.0105, 0.001],
+        0.9,
+        () => SKIN,
+        6
+      );
+    }
+
+    // matId 12 = pele
+    return this.packMesh(positions, normals, colors, uvs, indices, 12.0);
+  }
+
   packMesh(positions, normals, colors, uvs, indices, matId) {
     const vCount = positions.length / 3;
     const vertices = new Float32Array(vCount * 12);
@@ -1094,6 +1411,9 @@ export class ForestWorld {
     const canopiesBFar = new InstanceList(preset.trees * 2);
     const ferns = new InstanceList(preset.ferns);
     const grasses = new InstanceList(preset.grassTufts);
+    const bushes = new InstanceList(preset.bushes);
+    const reeds = new InstanceList(preset.reeds);
+    const broadleafs = new InstanceList(preset.broadleafs);
     const rocks = new InstanceList(preset.rocks * 2);
     const logs = new InstanceList(preset.fallenLogs);
     const mushrooms = new InstanceList(preset.mushrooms);
@@ -1408,6 +1728,50 @@ export class ForestWorld {
       }
     }
 
+    // 8. Arbustos — moitas fechadas na mata e na borda das clareiras
+    for (let i = preset.bushes * 8; i > 0 && bushes.count < preset.bushes; i--) {
+      if (!pickForest(1)) continue;
+      const x = spot[0], z = spot[1];
+      if (this.shoreDist(x, z) < S * 0.028) continue;
+      if (this.riverMask(x, z) > 0.3) continue;
+      const y = this.getMeshHeight(x, z, res, meshCache);
+      if (y < -2.1 || y > 12.5) continue;
+      const density = this.noise.noise2D(x * 0.09 - 40, z * 0.09 + 33);
+      if (density < 0.34 && rng.next() > 0.25) continue;
+      bushes.push(cellOf(x, y, z), x, y - 0.05, z, rng.range(0.8, 1.9), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.25), 0.55);
+    }
+
+    // 9. Juncos — só na margem úmida dos rios, da nascente à foz: ancorados
+    // num ponto do rio e deslocados pela perpendicular até a faixa do brejo
+    for (let i = preset.reeds * 8; i > 0 && reeds.count < preset.reeds; i--) {
+      const rt = rng.next();
+      const rp = riverPoint(rt), rq = riverPoint(Math.min(1.0, rt + 0.002));
+      const tl = Math.hypot(rq[0] - rp[0], rq[1] - rp[1]) || 1;
+      const side = rng.next() < 0.5 ? 1.0 : -1.0;
+      const px = -(rq[1] - rp[1]) / tl * side, pz = (rq[0] - rp[0]) / tl * side;
+      const coreW = this.riverCore(this.shoreDist(rp[0], rp[1]));
+      const d = rng.range(coreW + 1.0, coreW + 8.0);
+      const x = rp[0] + px * d + rng.range(-2.5, 2.5);
+      const z = rp[1] + pz * d + rng.range(-2.5, 2.5);
+      if (this.riverMask(x, z) > 0.55) continue; // dentro d'água não
+      const y = this.getMeshHeight(x, z, res, meshCache);
+      if (y < this.waterLevel - 0.4 || y > this.waterLevel + 2.4) continue;
+      reeds.push(cellOf(x, y, z), x, y - 0.04, z, rng.range(0.7, 1.5), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.3), 0.9);
+    }
+
+    // 10. Taiobas — folhagem larga rasteira do sub-bosque sombreado e úmido
+    for (let i = preset.broadleafs * 8; i > 0 && broadleafs.count < preset.broadleafs; i--) {
+      if (!pickForest(1)) continue;
+      const x = spot[0], z = spot[1];
+      if (this.shoreDist(x, z) < S * 0.028) continue;
+      if (this.riverMask(x, z) > 0.5) continue;
+      const y = this.getMeshHeight(x, z, res, meshCache);
+      if (y < -2.2 || y > 10.0) continue;
+      const density = this.noise.noise2D(x * 0.13 + 55, z * 0.13 + 61);
+      if (density < 0.38 && rng.next() > 0.2) continue;
+      broadleafs.push(cellOf(x, y, z), x, y - 0.04, z, rng.range(0.7, 1.6), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.25), 0.5);
+    }
+
     // Esfera envolvente de cada célula: o piso ocupado + a altura das
     // árvores e a copa que avança sobre as vizinhas (raio 0 = célula vazia)
     const centerY = new Float32Array(cellCount);
@@ -1422,6 +1786,7 @@ export class ForestWorld {
     // Cada lista sai ordenada por célula, com a tabela de faixas em grid.starts
     const out = {
       spores, sporeCount: preset.spores,
+      rainCount: preset.rainDrops,
       grid: {
         n: GRID_N, cellSize, centerY, radius, starts: {},
         detailDist: preset.treeDetailDist, lodDist: preset.treeLodDist, understoryDist: preset.understoryDist
@@ -1432,6 +1797,7 @@ export class ForestWorld {
       canopiesA: [canopiesA, 'canopyACount'], canopiesB: [canopiesB, 'canopyBCount'],
       canopiesAFar: [canopiesAFar, 'canopyAFarCount'], canopiesBFar: [canopiesBFar, 'canopyBFarCount'],
       ferns: [ferns, 'fernCount'], grasses: [grasses, 'grassCount'],
+      bushes: [bushes, 'bushCount'], reeds: [reeds, 'reedCount'], broadleafs: [broadleafs, 'broadleafCount'],
       rocks: [rocks, 'rockCount'],
       logs: [logs, 'logCount'], mushrooms: [mushrooms, 'mushroomCount'],
       trunksC: [trunksC, 'trunkCCount'], canopiesC: [canopiesC, 'canopyCCount'], canopiesCFar: [canopiesCFar, 'canopyCFarCount']

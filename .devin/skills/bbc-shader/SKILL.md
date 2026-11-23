@@ -81,7 +81,7 @@ Preenchido no fim de `loop()` em `src/main.js` (`grep -n "u\[48\]" src/main.js`)
 | `lightViewProj` | 32–47 | matriz do sol (sombra) |
 | `cameraPos` | 48–51 | xyz posição · **w = seed do mundo** |
 | `sunDir` | 52–55 | xyz direção · **w = alcance do sub-bosque (m)** |
-| `sunColor` | 56–59 | rgb · w livre (hoje 1.0) |
+| `sunColor` | 56–59 | rgb · **w = intensidade da chuva (0–1)** |
 | `skyTopColor` | 60–63 | rgb · w livre |
 | `skyHorizonColor` | 64–67 | rgb · w livre |
 | `fogColor` | 68–71 | rgb · w livre |
@@ -92,11 +92,11 @@ Preenchido no fim de `loop()` em `src/main.js` (`grep -n "u\[48\]" src/main.js`)
 
 **Caminho fácil — reaproveitar um `.w` livre** (não muda tamanho nenhum):
 
-1. Em `main.js`, troque o `1.0` do slot, por exemplo `u[59] = this.meuValor;`, e
+1. Em `main.js`, troque o `1.0` do slot, por exemplo `u[63] = this.meuValor;`, e
    comente o significado na mesma linha, como os vizinhos.
 2. Em `shaders.js`, atualize o comentário do campo nas **duas** structs e leia
-   `frame.sunColor.w` (ou `frame2.sunColor.w` no pós).
-3. Antes, confirme que o slot não é lido: `grep -n "sunColor.w" src/shaders.js`.
+   `frame.skyTopColor.w` (ou `frame2.skyTopColor.w` no pós).
+3. Antes, confirme que o slot não é lido: `grep -n "skyTopColor.w" src/shaders.js`.
 
 **Caminho completo — os 4 slots livres acabaram:**
 

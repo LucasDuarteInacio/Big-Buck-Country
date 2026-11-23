@@ -13,12 +13,13 @@ export const WGSL_SHADERS = /* wgsl */`
     lightViewProj: mat4x4<f32>,
     cameraPos: vec4<f32>, // w: seed do mundo (hash do leito no shader de água)
     sunDir: vec4<f32>,    // w: alcance do sub-bosque em metros (fade no vsInstanced)
-    sunColor: vec4<f32>,
-    skyTopColor: vec4<f32>,
-    skyHorizonColor: vec4<f32>,
-    fogColor: vec4<f32>,
-    params: vec4<f32>,  // x: time, y: windStrength, z: fogDensity, w: sunElevation
+    sunColor: vec4<f32>,    // .w: intensidade da chuva (0–1)
+    skyTopColor: vec4<f32>,     // .w: direção da lua .x
+    skyHorizonColor: vec4<f32>, // .w: direção da lua .y
+    fogColor: vec4<f32>,        // .w: direção da lua .z
+    params: vec4<f32>,  // x: time, y: windStrength, z: fogDensity, w: sunElevation (com sinal: <0 noite)
     params2: vec4<f32>, // x: godRaySteps, y: bloomThreshold, z: shadowBias, w: aspect
+    handsMat: mat4x4<f32>, // viewmodel→mundo das mãos em primeira pessoa (modo jogo)
   };
 
   @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -29,7 +30,6 @@ export const WGSL_SHADERS = /* wgsl */`
   @group(0) @binding(4) var texRock: texture_2d<f32>;
   @group(0) @binding(5) var texGround: texture_2d<f32>;
   @group(0) @binding(6) var texNoise: texture_2d<f32>;
-  @group(0) @binding(7) var texStars: texture_2d<f32>;
   @group(0) @binding(9) var texLitter: texture_2d<f32>;
   @group(0) @binding(10) var texWet: texture_2d<f32>;
   @group(0) @binding(11) var texTwigs: texture_2d<f32>;
@@ -326,13 +326,13 @@ ${ISLAND_WGSL}
   // modulada por ruído ao longo da costa — ondas chegam em grupos
   fn shoreWaves(pos: vec2<f32>, dh: f32, t: f32) -> vec2<f32> {
     let d = max(dh, 0.0);
-    var p = d * 8.0 + t * 1.5;
+    var p = d * 8.0 + t * 2.1;
     let nz = vec2<f32>(
       worldNoise2D(pos.x * 0.1, pos.y * 0.1),
       worldNoise2D(pos.x * 0.1 + 13.7, pos.y * 0.1 - 7.1)
     );
     p += nz.x * 4.0;
-    let waveMag = exp(-d * 0.7);
+    let waveMag = exp(-d * 0.55);
     let sw = sin(p + cos(p) * (1.0 - waveMag)) * -0.5 + 0.5;
     let fm = sin(p - 2.67) * 0.5 + 0.5;
     return vec2<f32>(sw * sqrt(waveMag), fm * waveMag) * nz.y;
@@ -484,6 +484,23 @@ ${ISLAND_WGSL}
     return out;
   }
 
+  // Mãos em primeira pessoa (modo jogo): vértices no espaço do viewmodel
+  // (+z = olhar); handsMat leva a base direita/cima/frente da câmera p/
+  // o mundo — as mãos recebem o mesmo sol, sombra PCF e névoa do cenário
+  @vertex
+  fn vsHands(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let worldPos = frame.handsMat * vec4<f32>(in.position, 1.0);
+    out.worldPos = worldPos.xyz;
+    out.worldNormal = (frame.handsMat * vec4<f32>(in.normal, 0.0)).xyz;
+    out.color = in.color;
+    out.uv = in.uv;
+    out.matId = in.matId;
+    out.hueJit = 0.0;
+    out.clipPos = frame.viewProj * worldPos;
+    return out;
+  }
+
   // --- SHADOW SAMPLING PCF 3x3 ---
   fn sampleShadowPCF(worldPos: vec3<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
     let lightClip = frame.lightViewProj * vec4<f32>(worldPos, 1.0);
@@ -535,7 +552,12 @@ ${ISLAND_WGSL}
   fn fsMain(in: VertexOutput) -> @location(0) vec4<f32> {
     var N = normalize(in.worldNormal);
     let V = normalize(frame.cameraPos.xyz - in.worldPos);
-    let L = normalize(frame.sunDir.xyz);
+    // Fonte de luz efetiva: sol até o crepúsculo profundo; abaixo de -0.05
+    // de elevação a lua assume (mesma regra da lightViewProj na CPU)
+    let moonDir = vec3<f32>(frame.skyTopColor.w, frame.skyHorizonColor.w, frame.fogColor.w);
+    let moonLit = frame.params.w < -0.05;
+    let L = normalize(select(moonDir, normalize(frame.sunDir.xyz), !moonLit));
+    let lightCol = select(vec3<f32>(0.42, 0.50, 0.72) * 0.55, frame.sunColor.xyz, !moonLit);
     let H = normalize(L + V);
 
     var albedo = in.color;
@@ -869,12 +891,14 @@ ${ISLAND_WGSL}
 
       // Duas fases defasadas de meio ciclo com domínios ressaltados:
       // a água nasce rio acima, corre e dissolve — advecção contínua
-      let wTime = t * 0.85;
+      // Vento (params.y) agita a superfície: ciclo de advecção mais rápido
+      // e normais mais inclinadas com o slider de vento do HUD
+      let wTime = t * (0.85 + frame.params.y * 0.45);
       let t0 = fract(wTime);
       let t1 = fract(wTime + 0.5);
       let uv0 = wp.xz + hash22(floor(wTime)) * 13.0;
       let uv1 = wp.xz + hash22(floor(wTime + 0.5)) * 13.0;
-      let fMag = 2.5 / (1.0 + flowSpeed * flowSpeed * 5.0);
+      let fMag = (2.5 + frame.params.y * 1.5) / (1.0 + flowSpeed * flowSpeed * 4.0);
       // O ruído é amostrado em uv + offset: para o padrão andar com flow
       // o offset tem de recuar (-flow·t) — com o sinal trocado o rio subia
       let adv0 = -flow * (t0 - 0.5);
@@ -894,8 +918,8 @@ ${ISLAND_WGSL}
       }
       if (seaM > 0.001) {
         let swell = mix(
-          waterSurf(uv0, adv0, fMag * 0.42, wFoam, waterFwidth, 2.0),
-          waterSurf(uv1, adv1, fMag * 0.42, wFoam, waterFwidth, 2.0),
+          waterSurf(uv0, adv0, fMag * 0.55, wFoam, waterFwidth, 2.0),
+          waterSurf(uv1, adv1, fMag * 0.55, wFoam, waterFwidth, 2.0),
           phase
         );
         surf = mix(surf, swell, seaM);
@@ -909,8 +933,8 @@ ${ISLAND_WGSL}
       var swashH = 0.0;
       if (depthRaw < 3.5 && seaM > 0.25) {
         let sw = shoreWaves(wp.xz, depthRaw, t);
-        swashH = sw.x * 0.9;
-        wFoam = clamp(wFoam + sw.y * 0.55, 0.0, 1.0);
+        swashH = sw.x * 5.2;
+        wFoam = clamp(wFoam + sw.y * 0.7, 0.0, 1.0);
       }
       let wFoamTex = mix(
         waterFoamTex(uv0, adv0 * 0.25),
@@ -923,12 +947,27 @@ ${ISLAND_WGSL}
 
       // Linha d'água viva: swell + swash decidem se o pixel é água — a
       // lâmina avança e recua sobre a areia em vez de uma reta estática
-      if (depthRaw + (wH - 0.5) * 0.10 + swashH < -0.015) { discard; }
+      if (depthRaw + (wH - 0.5) * 0.72 + swashH < -0.015) { discard; }
 
       albedo = vec3<f32>(0.0); // difuso vem da refração/espuma na etapa de ambiente
       roughness = mix(0.05, 0.5, wFoamBlend);
       ao = 1.0;
+    } else if (mat == 12) {
+      // Pele (mãos do modo jogo): poros e vincos em micro-ruído de worldPos,
+      // cutícula mais lisa que casca/folha
+      let pore = noise3D(in.worldPos * 140.0);
+      let crease = fbm3(in.worldPos * 22.0);
+      albedo = in.color * (0.86 + pore * 0.20 + crease * 0.12);
+      roughness = 0.58;
+      ao = 0.82 + 0.18 * crease;
+      bump = (pore - 0.5) * 0.6 + (crease - 0.5) * 0.5;
+      bumpScale = 0.55;
     }
+
+    // Chuva molha as superfícies: albedo escurece e a cutícula fica mais lisa
+    let rainWet = frame.sunColor.w;
+    albedo *= 1.0 - rainWet * 0.20;
+    roughness *= 1.0 - rainWet * 0.38;
 
     N = normalize(N + (dpdx(bump) + dpdy(bump)) * bumpScale * detailFade);
 
@@ -966,13 +1005,13 @@ ${ISLAND_WGSL}
     let kD = (vec3<f32>(1.0) - kS) * (1.0 - metallic);
 
     // Iluminação Direta do Sol
-    let radiance = frame.sunColor.xyz * 2.2;
+    let radiance = lightCol * 2.2;
     var Lo = (kD * albedo / 3.14159265 + specular) * radiance * NdotL * shadow;
 
     // Subsurface Scattering (Translucidez nas folhas quando iluminadas por trás)
     if (mat == 2 || mat == 3 || mat == 7 || mat == 10) {
       let backScatter = pow(clamp(dot(V, -L), 0.0, 1.0), 3.0) * (0.4 + 0.6 * in.uv.y);
-      let sss = select(vec3<f32>(0.36, 0.72, 0.16), vec3<f32>(0.95, 0.20, 0.10), mat == 10) * frame.sunColor.xyz * backScatter * (0.35 + 0.65 * shadow) * 1.1;
+      let sss = select(vec3<f32>(0.36, 0.72, 0.16), vec3<f32>(0.95, 0.20, 0.10), mat == 10) * lightCol * backScatter * (0.35 + 0.65 * shadow) * 1.1;
       Lo += sss;
     }
 
@@ -984,7 +1023,7 @@ ${ISLAND_WGSL}
     if (mat == 6) {
       // --- Água corrente: refração analítica + reflexo de céu/nuvens ---
       // Lâmina local ondulada pela crista (linha d'água e espuma respiram)
-      let depthW = max(wDepth + (wH - 0.5) * 0.10 + wSwash, 0.0);
+      let depthW = max(wDepth + (wH - 0.5) * 0.72 + wSwash, 0.0);
       let refrDir = refract(-V, N, 1.0 / 1.3333);
       let pathT = depthW / max(-refrDir.y, 0.30);
       let bedPos = in.worldPos + refrDir * pathT;
@@ -996,7 +1035,7 @@ ${ISLAND_WGSL}
       bedAlb *= 0.78 + 0.44 * noise3D(bedPos * 8.0);
       // Sol difuso no fundo sob a mesma sombra PCF + cintilação das cristas
       let caust = 0.80 + 0.45 * wH;
-      let bedLight = (frame.sunColor.xyz * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;
+      let bedLight = (lightCol * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;
       // Extinção espectral: azul some antes → chá esverdeado; absorção
       // mais forte para o leito não "passar por água seca" de cima
       var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.90, 1.15, 1.70) * 1.05);
@@ -1005,7 +1044,7 @@ ${ISLAND_WGSL}
       let sedCol = mix(vec3<f32>(0.035, 0.095, 0.090), vec3<f32>(0.015, 0.08, 0.18), wSea);
       let scatter = (1.0 - exp(-pathT * 1.55)) * (0.55 + 0.45 * fwd) + 0.40 * (1.0 - wSea);
       transmit += sedCol
-                * (frame.sunColor.xyz * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
+                * (lightCol * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
                 * scatter;
 
       // Reflexo do céu + nuvens procedurais projetadas no plano a 240m
@@ -1015,13 +1054,13 @@ ${ISLAND_WGSL}
         let cHit = in.worldPos + R * ((240.0 - in.worldPos.y) / R.y);
         let dayAmtW = clamp(frame.params.w * 2.4 + 0.08, 0.0, 1.0);
         let cloudCol = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62
-                     + vec3<f32>(0.10) + frame.sunColor.xyz * 0.55 * dayAmtW;
+                     + vec3<f32>(0.10) + lightCol * 0.55 * dayAmtW;
         skyRefl = mix(skyRefl, cloudCol, cloudCoverage(cloudUV(cHit)) * 0.8);
       }
       // Brilho azimutal do horizonte na direção do sol (como no fsSky)
       let rAzim = normalize(vec3<f32>(R.x, 0.0, R.z) + vec3<f32>(0.001));
       let lAzim = normalize(vec3<f32>(L.x, 0.0, L.z) + vec3<f32>(0.001));
-      skyRefl += frame.sunColor.xyz * pow(max(dot(rAzim, lAzim), 0.0), 2.5)
+      skyRefl += lightCol * pow(max(dot(rAzim, lAzim), 0.0), 2.5)
                * exp(-max(R.y, 0.0) * 5.0) * 0.18 * clamp(frame.params.w * 2.0, 0.0, 1.0);
 
       // Fresnel com piso: de cima o rio ainda reflete um pouco o céu
@@ -1035,7 +1074,7 @@ ${ISLAND_WGSL}
           + edgeLine * 0.55,
         0.0, 0.72
       );
-      let foamCol = (frame.sunColor.xyz * 1.35 * max(NdotL, 0.12) * shadow + skyAmbient * 0.8)
+      let foamCol = (lightCol * 1.35 * max(NdotL, 0.12) * shadow + skyAmbient * 0.8)
                   * vec3<f32>(0.62, 0.66, 0.62);
       ambient = mix(waterCol, foamCol, foamAmt);
     }
@@ -1049,7 +1088,7 @@ ${ISLAND_WGSL}
     // Espalhamento direcional: a névoa brilha quando se olha na direção do sol
     let sunInsc = pow(clamp(dot(-V, L), 0.0, 1.0), 6.0);
     let dayAmt2 = clamp(frame.params.w * 2.0, 0.0, 1.0);
-    let fogTint = frame.fogColor.xyz + frame.sunColor.xyz * sunInsc * 0.45 * dayAmt2;
+    let fogTint = frame.fogColor.xyz + lightCol * sunInsc * 0.45 * dayAmt2;
 
     // Os god rays volumétricos rodam agora no passe de composição a partir
     // da posição reconstruída do depth: idêntico por pixel, mas avaliado
@@ -1072,7 +1111,8 @@ ${ISLAND_WGSL}
     f += fbm3(q * 4.2) * 0.38; // erosão das bordas
     // Forma de cúmulo: base achatada, topo arredondado
     let hg = smoothstep(0.0, 0.28, h) * (1.0 - smoothstep(0.55, 1.0, h));
-    return max(0.0, f - 0.80) * hg * 5.0;
+    // Com chuva o limiar cai e a cobertura fecha em céu nublado
+    return max(0.0, f - mix(0.80, 0.56, frame.sunColor.w)) * hg * 5.0;
   }
 
   // --- SHADER DE CÉU ATMOSFÉRICO & DISCO SOLAR ---
@@ -1121,7 +1161,22 @@ ${ISLAND_WGSL}
     let sunDisc = smoothstep(0.9993, 0.9997, sunAmt) * 14.0;
     let sunHalo = pow(sunAmt, 20.0) * 0.9 + pow(sunAmt, 220.0) * 4.0;
     let sunGlow = pow(sunAmt, 5.0) * 0.22 * (0.4 + golden * 0.6);
-    col += frame.sunColor.xyz * (sunDisc + sunHalo + sunGlow) * max(elev + 0.15, 0.0);
+    col += frame.sunColor.xyz * (sunDisc + sunHalo + sunGlow) * max(elev + 0.15, 0.0) * (1.0 - frame.sunColor.w * 0.92);
+
+    // Lua: mesmo arco leste→oeste do sol, meio ciclo atrasada (nasce a
+    // leste quando o sol se põe). Direção vem nos .w das cores de céu.
+    let moonDir = vec3<f32>(frame.skyTopColor.w, frame.skyHorizonColor.w, frame.fogColor.w);
+    let nightAmt2 = clamp(-elev * 4.0, 0.0, 1.0);
+    let moonVis = nightAmt2 * smoothstep(-0.02, 0.05, moonDir.y);
+    if (moonVis > 0.01) {
+      let moonAmt = max(dot(rayDir, moonDir), 0.0);
+      let discMask = smoothstep(0.9996, 0.99985, moonAmt);
+      var maria = 1.0;
+      if (discMask > 0.001) { maria = 0.72 + 0.55 * fbm3(rayDir * 48.0); }
+      let moonDisc = discMask * 4.2 * maria;
+      let moonHalo = pow(moonAmt, 90.0) * 0.40 + pow(moonAmt, 9.0) * 0.05;
+      col += vec3<f32>(0.80, 0.86, 1.0) * (moonDisc + moonHalo) * moonVis * (1.0 - frame.sunColor.w * 0.85);
+    }
 
     // Nuvens volumétricas raymarchadas (camada 240m–420m): Beer + luz solar marchada
     if (rayDir.y > 0.015) {
@@ -1148,11 +1203,13 @@ ${ISLAND_WGSL}
             dL += cloudDens(p + L * 12.0);
             let litF = exp(-dL * 0.22);
             // Ambiente branco-azulado (luz do céu espalhada), não cinza-chumbo
-            let amb = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62 + vec3<f32>(0.10);
+            let amb = (mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62 + vec3<f32>(0.10))
+                    * (1.0 - frame.sunColor.w * 0.45);
             let sun = frame.sunColor.xyz * (1.7 * pow(litF, 1.4) + 0.10) * max(dayAmt, 0.06);
             // Bordas translúcidas brilham (powder) + brilho prateado ao olhar para o sol
             let powder = 1.0 - exp(-d * 3.0);
-            let silver = frame.sunColor.xyz * pow(sunAmt, 7.0) * 0.5 * dayAmt;
+            let silver = frame.sunColor.xyz * pow(sunAmt, 7.0) * 0.5 * dayAmt
+                       + vec3<f32>(0.75, 0.82, 1.0) * pow(max(dot(rayDir, moonDir), 0.0), 7.0) * 0.35 * moonVis;
             let S = (amb + sun + silver) * d * powder;
             acc += T * S * dt * 0.62;
             T *= exp(-d * 0.55 * dt);
@@ -1163,19 +1220,16 @@ ${ISLAND_WGSL}
       }
     }
 
-    // Estrelas cintilantes durante a noite + campo estelar fotográfico
+    // Estrelas cintilantes durante a noite
     let night = clamp(1.0 - elev * 3.0, 0.0, 1.0);
     if (night > 0.01 && rayDir.y > 0.02) {
-      let eq = vec2<f32>(atan2(rayDir.z, rayDir.x) / 6.2831853 + 0.5, rayDir.y * 0.5 + 0.5);
-      let milky = texLin(texStars, eq * vec2<f32>(2.0, 1.0));
-      col += milky * night * smoothstep(0.02, 0.22, rayDir.y) * 1.6;
       let sp = rayDir * 190.0;
       let h = hash31(floor(sp));
       if (h > 0.985) {
         let g = fract(sp) - 0.5;
         let star = smoothstep(0.32, 0.02, length(g));
         let tw = 0.65 + 0.35 * sin(frame.params.x * 2.6 + h * 57.0);
-        col += vec3<f32>(0.85, 0.92, 1.0) * star * tw * night * smoothstep(0.02, 0.18, rayDir.y);
+        col += vec3<f32>(0.85, 0.92, 1.0) * star * tw * night * smoothstep(0.02, 0.18, rayDir.y) * (1.0 - frame.sunColor.w);
       }
     }
 
@@ -1228,6 +1282,93 @@ ${ISLAND_WGSL}
     let glow = pow(1.0 - d, 2.4) * in.alpha;
     return vec4<f32>(in.color * glow * 3.2, glow);
   }
+
+  // --- SHADER DE CHUVA: riscos instanciados numa caixa ancorada na câmera ---
+  struct RainOut {
+    @builtin(position) clipPos: vec4<f32>,
+    @location(0) localUV: vec2<f32>,
+    @location(1) alpha: f32,
+  };
+
+  @vertex
+  fn vsRain(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32) -> RainOut {
+    var out: RainOut;
+    var offsets = array<vec2<f32>, 6>(
+      vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+      vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0)
+    );
+    let uv = offsets[vIdx];
+    let rain = frame.sunColor.w;
+    let fi = f32(iIdx);
+    let h1 = hashF(fi + 0.5);
+    let h2 = hashF(fi * 1.7 + 13.1);
+    let h3 = hashF(fi * 2.3 + 7.7);
+    let h4 = hashF(fi * 3.1 + 29.3);
+
+    // A fração de gotas ativas acompanha a intensidade do slider
+    if (h4 > rain) {
+      out.clipPos = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+      out.localUV = uv;
+      out.alpha = 0.0;
+      return out;
+    }
+
+    let R = 24.0;
+    let H = 22.0;
+    let cam = frame.cameraPos.xyz;
+    let speed = 10.0 + h1 * 5.0;
+    // Envoltório vertical: a gota cai e renasce no topo da caixa
+    let cyc = fract(h2 - frame.params.x * speed / H);
+    let wind = frame.params.y;
+    let drift = vec2<f32>(0.9 + wind * 1.6, 0.35 * wind);
+    // Deriva horizontal embrulhada na caixa, ancorada na câmera
+    let lx = fract(h1 + frame.params.x * drift.x / (2.0 * R));
+    let lz = fract(h3 + frame.params.x * drift.y / (2.0 * R));
+    let base = vec3<f32>(
+      cam.x + (lx - 0.5) * 2.0 * R,
+      cam.y - 5.0 + cyc * (H + 5.0),
+      cam.z + (lz - 0.5) * 2.0 * R
+    );
+
+    // Risco esticado na direção de queda, inclinada pelo vento
+    let fallDir = normalize(vec3<f32>(drift.x * 0.4, -speed, drift.y * 0.4));
+    let dropLen = 0.45 + h3 * 0.5;
+    let cA = frame.viewProj * vec4<f32>(base - fallDir * dropLen * 0.5, 1.0);
+    let cB = frame.viewProj * vec4<f32>(base + fallDir * dropLen * 0.5, 1.0);
+    if (cA.w < 0.05 || cB.w < 0.05) {
+      out.clipPos = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+      out.localUV = uv;
+      out.alpha = 0.0;
+      return out;
+    }
+
+    // Perpendicular ao risco na tela, com largura constante no mundo
+    var dir = cB.xy / cB.w - cA.xy / cA.w;
+    dir /= max(length(dir), 0.0001);
+    var perp = vec2<f32>(-dir.y, dir.x);
+    perp.x /= frame.params2.w;
+
+    var clip = mix(cA, cB, uv.y * 0.5 + 0.5);
+    clip = vec4<f32>(clip.xy + perp * uv.x * (0.010 + h2 * 0.008) * 1.73, clip.z, clip.w);
+
+    let d = length(base - cam);
+    let edgeFade = smoothstep(0.0, 0.12, cyc) * (1.0 - smoothstep(0.88, 1.0, cyc));
+    let distFade = smoothstep(1.0, 2.4, d) * (1.0 - smoothstep(R * 0.55, R * 1.05, d));
+    out.clipPos = clip;
+    out.localUV = uv;
+    out.alpha = edgeFade * distFade * rain * (0.22 + h4 * 0.16);
+    return out;
+  }
+
+  @fragment
+  fn fsRain(in: RainOut) -> @location(0) vec4<f32> {
+    let side = 1.0 - in.localUV.x * in.localUV.x;
+    let tip = 1.0 - in.localUV.y * in.localUV.y;
+    let a = in.alpha * side * (0.35 + 0.65 * tip);
+    // A gota refrata o céu encoberto: um pouco mais clara que a névoa ambiente
+    let col = mix(frame.fogColor.xyz, frame.skyHorizonColor.xyz, 0.6) * 1.3 + frame.sunColor.xyz * 0.05;
+    return vec4<f32>(col, a);
+  }
 `;
 
 export const WGSL_POST_SHADERS = /* wgsl */`
@@ -1243,12 +1384,13 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     lightViewProj: mat4x4<f32>,
     cameraPos: vec4<f32>,
     sunDir: vec4<f32>,
-    sunColor: vec4<f32>,
-    skyTopColor: vec4<f32>,
-    skyHorizonColor: vec4<f32>,
-    fogColor: vec4<f32>,
-    params: vec4<f32>,
+    sunColor: vec4<f32>,    // .w: intensidade da chuva (0–1)
+    skyTopColor: vec4<f32>,     // .w: direção da lua .x
+    skyHorizonColor: vec4<f32>, // .w: direção da lua .y
+    fogColor: vec4<f32>,        // .w: direção da lua .z
+    params: vec4<f32>,          // .w: sunElevation com sinal (<0 noite)
     params2: vec4<f32>,
+    handsMat: mat4x4<f32>,
   };
 
   @group(0) @binding(0) var<uniform> post: PostUniforms;
@@ -1281,7 +1423,10 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     let rayVec = worldPos - rayStart;
     let totalDist = min(length(rayVec), 95.0);
     let rayDir = rayVec / max(length(rayVec), 0.0001);
-    let L = normalize(frame2.sunDir.xyz);
+    // Mesma regra do fsMain: lua vira a fonte de luz abaixo de -0.05 de
+    // elevação → raios de luar (o shadow map já segue lightDir na CPU)
+    let moonDir = vec3<f32>(frame2.skyTopColor.w, frame2.skyHorizonColor.w, frame2.fogColor.w);
+    let L = normalize(select(moonDir, normalize(frame2.sunDir.xyz), frame2.params.w > -0.05));
 
     // Fase de Mie (forte espalhamento frontal quando olhando na direção do sol)
     let cosTheta = dot(rayDir, L);
@@ -1312,7 +1457,8 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     }
 
     let transmittance = (accumLight / f32(max(steps, 1))) * totalDist * 0.018;
-    let rayStrength = transmittance * (0.35 + miePhase * 1.45) * frame2.params.z * max(frame2.params.w, 0.08);
+    let rayStrength = transmittance * (0.35 + miePhase * 1.45) * frame2.params.z * max(frame2.params.w, 0.08)
+                    * (1.0 - frame2.sunColor.w * 0.85); // a chuva dispersa os raios
     return frame2.sunColor.xyz * rayStrength;
   }
 
@@ -1440,13 +1586,22 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     hdrColor *= bloom.a;
     hdrColor += bloom.rgb * post.bloomIntensity;
 
+    // Gradação de verão: luz dourada de sol a pino
+    hdrColor *= vec3<f32>(1.07, 1.0, 0.90);
+
     // Vinheta óptica cinematográfica
-    let vignette = 1.0 - distSq * 0.52;
-    hdrColor *= clamp(vignette, 0.45, 1.0);
+    let vignette = 1.0 - distSq * 0.40;
+    hdrColor *= clamp(vignette, 0.5, 1.0);
 
     // ACES Filmic Tone Mapping
     let mapped = (hdrColor * (2.51 * hdrColor + 0.03)) / (hdrColor * (2.43 * hdrColor + 0.59) + 0.14);
-    let gammaCorrected = pow(max(mapped, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+
+    // Vibrância e contraste em S: verdes e céu de verão
+    var graded = mix(mapped, mapped * mapped * (3.0 - 2.0 * mapped), 0.32);
+    let lumaC = dot(graded, vec3<f32>(0.2126, 0.7152, 0.0722));
+    graded = mix(vec3<f32>(lumaC), graded, 1.24);
+
+    let gammaCorrected = pow(max(graded, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
     return vec4<f32>(gammaCorrected, 1.0);
   }
 `;
