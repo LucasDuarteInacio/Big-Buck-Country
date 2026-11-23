@@ -96,7 +96,29 @@ Ao terminar **qualquer** tarefa que altere código:
 
 ### Screenshots do README
 
-Para recapturar `screenshots/` sem interação manual: Playwright (`playwright-core`) apontando para o Chrome real (`executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'`, headless, `--enable-unsafe-webgpu`) — WebGPU funciona em headless. Na página: clicar `#btn-enter`, esperar `val-instances` mostrar "N árvores", posicionar via `window.bigBuck` (`cam.pos`/`cam.yaw`/`cam.pitch`/`cam.flyOffset`, `timeOfDay`, `fogDensity`) e congelar a resolução (`autoScale = () => {}; renderScale = 1; handleResize()`). O painel se esconde com `#btn-toggle-hud`.
+Para recapturar `screenshots/` sem interação manual: Playwright (`playwright-core`) apontando para o Chrome real (`executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'`, headless, `--enable-unsafe-webgpu`) — WebGPU funciona em headless. Na página: clicar `#btn-enter`, esperar `val-instances` mostrar "N árvores", posicionar via `window.bigBuck` (`cam.pos`/`cam.yaw`/`cam.pitch`/`cam.flying`, `timeOfDay`, `fogDensity`) e congelar a resolução (`autoScale = () => {}; renderScale = 1; handleResize()`). O painel se esconde com `#btn-toggle-hud`.
+
+## Skills do Projeto (`.devin/skills/`)
+
+Roteiros passo a passo e scripts sem dependências (Node 22+ e Chrome) para trabalhar no repositório. **Comece toda tarefa pelo `bbc-mapa-codigo` e termine pelo `bbc-verificar`.**
+
+| Skill | Quando usar |
+|---|---|
+| `bbc-mapa-codigo` | Início de qualquer tarefa: onde fica cada coisa e quais contratos mudam juntos |
+| `bbc-shader` | Editar WGSL, uniforms, bindings, texturas, pós-processamento |
+| `bbc-terreno` | Relevo, costa, rios, praia, mata — e o espelho `waterDepthAt` |
+| `bbc-instancias` | Novo objeto/planta, contagens, LOD, campos de `QUALITY_PRESETS` |
+| `bbc-captura` | Ver o resultado: captura de tela com câmera/hora/névoa escolhidas |
+| `bbc-verificar` | Fim de qualquer tarefa: automatiza a verificação pós-tarefa acima |
+
+```bash
+node .devin/skills/bbc-verificar/scripts/checar.mjs      # contratos entre módulos, <1 s, sem navegador
+node .devin/skills/bbc-verificar/scripts/verificar.mjs   # + Chrome headless: erros de WGSL/GPU/console, HUD, FPS, captura
+node .devin/skills/bbc-captura/scripts/captura.mjs --vista=partida
+node .devin/skills/bbc-terreno/scripts/mapa.mjs --arvores  # mapa da ilha visto de cima + contagens
+```
+
+Os scripts reaproveitam um servidor já no ar na porta 3000 (ou sobem e encerram o próprio). Ao mudar um contrato entre módulos (novo binding, novo campo de uniform, nova lista), atualize a checagem correspondente em `checar.mjs`.
 
 ## Limitações Conhecidas
 

@@ -291,7 +291,7 @@ ${ISLAND_WGSL}
     return pow(0.5, f);
   }
 
-  // --- CAMADA DE NUVENS PROCEDURAIS (plano a 55m, FBM rotacionado advectado pelo vento) ---
+  // --- CAMADA DE NUVENS PROCEDURAIS (plano a 240m, FBM rotacionado advectado pelo vento) ---
   fn cloudDensity(uv: vec2<f32>) -> f32 {
     var v = 0.0;
     var a = 0.55;
@@ -375,7 +375,7 @@ ${ISLAND_WGSL}
   fn fsShadowClip(in: ShadowOut) {
     let mat = i32(in.matId + 0.5);
     if ((mat == 2 && leafSilhouette(in.uv) < 0.0) ||
-        (mat == 7 && leafSilhouetteRound(in.uv) < 0.0)) {
+        ((mat == 7 || mat == 10) && leafSilhouetteRound(in.uv) < 0.0)) {
       discard;
     }
   }
@@ -425,11 +425,14 @@ ${ISLAND_WGSL}
 
     out.worldPos = worldPos;
     out.worldNormal = worldNorm;
-    out.color = in.color * inst.instMeta.z;
+    out.color = in.color * abs(inst.instMeta.z);
     out.uv = in.uv;
     out.matId = in.matId;
     // Variação determinística de matiz por instância (copas da mesma árvore variam sutilmente)
     out.hueJit = fract(sin(dot(inst.instPosScale.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Tint negativo marca rocha dentro do rio: o sinal viaja em hueJit
+    // (campo que a rocha não usa) e o fsMain lê como flag
+    if (inst.instMeta.z < 0.0) { out.hueJit = -1.0; }
     out.clipPos = frame.viewProj * vec4<f32>(worldPos, 1.0);
     return out;
   }
@@ -516,10 +519,10 @@ ${ISLAND_WGSL}
     // (silhueta irregular orgânica em vez de curva matemática limpa).
     // edgeN só é amostrado para materiais de folha — fora deles seria um
     // fetch desperdiçado em todo fragmento de terreno/rocha/casca.
-    if (mat == 2 || mat == 7) {
+    if (mat == 2 || mat == 7 || mat == 10) {
       let edgeN = textureSampleLevel(texNoise, texSamp, in.uv * 3.0 + vec2<f32>(in.hueJit * 37.0, in.hueJit * 11.0), 0.0).r;
       if ((mat == 2 && leafSilhouette(in.uv) < (edgeN - 0.5) * 0.11) ||
-          (mat == 7 && leafSilhouetteRound(in.uv) < (edgeN - 0.5) * 0.11)) {
+          ((mat == 7 || mat == 10) && leafSilhouetteRound(in.uv) < (edgeN - 0.5) * 0.11)) {
         discard;
       }
     }
@@ -620,7 +623,7 @@ ${ISLAND_WGSL}
       ao = (0.62 + 0.38 * barkNoise) * (1.0 - groove * 0.30) * (0.75 + 0.5 * bLum);
       bump = barkNoise * 0.18 + (1.0 - ridges) * 0.34 + bLum * 0.3;
       bumpScale = 4.0;
-    } else if (mat == 2 || mat == 3 || mat == 7) {
+    } else if (mat == 2 || mat == 3 || mat == 7 || mat == 10) {
       // Copas, Samambaias e Grama: estrutura interna da folha em espaço UV
       // (o detalhe por worldPos é constante dentro de uma folha — a textura real é por UV)
       let leafVar = noise3D(in.worldPos * 2.2);
@@ -645,7 +648,7 @@ ${ISLAND_WGSL}
              * (0.86 + 0.26 * cells) * (0.90 + 0.20 * cells2)
              * curl * along;
       // Nervuras sobem ligeiramente de tom
-      albedo += vec3<f32>(0.030, 0.048, 0.008) * veins;
+      albedo += select(vec3<f32>(0.030, 0.048, 0.008), vec3<f32>(0.060, 0.014, 0.010), mat == 10) * veins;
 
       // Mosqueado de matiz entre folhas: tons amarelados/escuros naturais
       // (ruído procedural + gray noise texturizado, quebra a periodicidade)
@@ -685,9 +688,16 @@ ${ISLAND_WGSL}
       let rt = mix(texLin(texRock, ruv), texLin(texGranite, ruv * 0.7), gmix);
       let rLum = dot(rt, vec3<f32>(0.299, 0.587, 0.114));
       albedo = mix(albedo * (0.66 + 0.22 * strata + 0.30 * rockGrain) * (0.86 + 0.28 * fleck), rt, 0.72);
-      let mossAmt = smoothstep(0.45, 0.85, max(0.0, in.worldNormal.y) * (0.55 + 0.9 * fbm3(wp * 1.8)));
+      // Rocha de rio (hueJit < 0): cinza dessaturado e ligeiramente mais
+      // escuro/liso — pedra lavada pela água, sem musgo
+      let riverRock = in.hueJit < -0.5;
+      if (riverRock) {
+        let rl = dot(albedo, vec3<f32>(0.299, 0.587, 0.114));
+        albedo = vec3<f32>(rl * 0.78, rl * 0.80, rl * 0.84);
+      }
+      let mossAmt = smoothstep(0.45, 0.85, max(0.0, in.worldNormal.y) * (0.55 + 0.9 * fbm3(wp * 1.8))) * select(1.0, 0.0, riverRock);
       albedo = mix(albedo, vec3<f32>(0.09, 0.18, 0.06), mossAmt * 0.65);
-      roughness = mix(0.72, 0.95, max(max(0.0, N.y), mossAmt));
+      roughness = mix(select(0.72, 0.40, riverRock), 0.95, max(max(0.0, N.y), mossAmt));
       bump = (rockGrain * 0.45 + strata * 0.35 + fleck * 0.20 + rLum * 0.5) * 0.3;
       bumpScale = 3.5;
     } else if (mat == 9) {
@@ -843,12 +853,12 @@ ${ISLAND_WGSL}
     // sol de materiais opacos: lá a sombra só multiplicaria termos já
     // zerados por NdotL (folha/água seguem: translucidez e reflexo a usam)
     var shadow = 1.0;
-    if (dot(N, L) > 0.0 || mat == 2 || mat == 3 || mat == 6 || mat == 7) {
+    if (dot(N, L) > 0.0 || mat == 2 || mat == 3 || mat == 6 || mat == 7 || mat == 10) {
       shadow = sampleShadowPCF(in.worldPos, N, L);
-      // Sombras projetadas das nuvens: interseção do raio sol->fragmento com o plano a 55m
+      // Sombras projetadas das nuvens: interseção do raio sol->fragmento com o plano a 240m
       // (params.w ~0 à noite anularia o fator — poupa o ruído das nuvens)
       if (L.y > 0.06 && frame.params.w > 0.02) {
-        let cloudHit = in.worldPos + L * ((55.0 - in.worldPos.y) / L.y);
+        let cloudHit = in.worldPos + L * ((240.0 - in.worldPos.y) / L.y);
         let cShadow = 1.0 - cloudCoverage(cloudUV(cloudHit)) * 0.62 * clamp(frame.params.w * 2.0, 0.0, 1.0);
         shadow *= cShadow;
       }
@@ -877,9 +887,9 @@ ${ISLAND_WGSL}
     var Lo = (kD * albedo / 3.14159265 + specular) * radiance * NdotL * shadow;
 
     // Subsurface Scattering (Translucidez nas folhas quando iluminadas por trás)
-    if (mat == 2 || mat == 3 || mat == 7) {
+    if (mat == 2 || mat == 3 || mat == 7 || mat == 10) {
       let backScatter = pow(clamp(dot(V, -L), 0.0, 1.0), 3.0) * (0.4 + 0.6 * in.uv.y);
-      let sss = vec3<f32>(0.36, 0.72, 0.16) * frame.sunColor.xyz * backScatter * (0.35 + 0.65 * shadow) * 1.1;
+      let sss = select(vec3<f32>(0.36, 0.72, 0.16), vec3<f32>(0.95, 0.20, 0.10), mat == 10) * frame.sunColor.xyz * backScatter * (0.35 + 0.65 * shadow) * 1.1;
       Lo += sss;
     }
 
@@ -913,11 +923,11 @@ ${ISLAND_WGSL}
                 * (frame.sunColor.xyz * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
                 * scatter;
 
-      // Reflexo do céu + nuvens procedurais projetadas no plano a 55m
+      // Reflexo do céu + nuvens procedurais projetadas no plano a 240m
       let R = reflect(-V, N);
       var skyRefl = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, pow(max(R.y, 0.0), 0.55));
       if (R.y > 0.02 && frame.params.w > 0.02) {
-        let cHit = in.worldPos + R * ((55.0 - in.worldPos.y) / R.y);
+        let cHit = in.worldPos + R * ((240.0 - in.worldPos.y) / R.y);
         let dayAmtW = clamp(frame.params.w * 2.4 + 0.08, 0.0, 1.0);
         let cloudCol = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62
                      + vec3<f32>(0.10) + frame.sunColor.xyz * 0.55 * dayAmtW;
@@ -968,15 +978,16 @@ ${ISLAND_WGSL}
   // Densidade volumétrica 3D (estilo iq "Clouds"): FBM 3D forma cúmulos de
   // verdade — não colunas. Erosão por oitava fina + gradiente de altura.
   fn cloudDens(p: vec3<f32>) -> f32 {
-    let h = clamp((p.y - 45.0) / 70.0, 0.0, 1.0);
+    let h = clamp((p.y - 240.0) / 180.0, 0.0, 1.0);
     if (h <= 0.0 || h >= 1.0) { return 0.0; }
     let wind = vec3<f32>(frame.params.x * 0.9, 0.0, frame.params.x * 0.4) * 0.01;
-    var q = p * 0.009 + wind;
+    var q = p * 0.008 + wind;
     var f = fbm3(q * 1.35);
+    if (f < 0.47) { return 0.0; } // nem com a erosão cheia passa do limiar
     f += fbm3(q * 4.2) * 0.38; // erosão das bordas
     // Forma de cúmulo: base achatada, topo arredondado
     let hg = smoothstep(0.0, 0.28, h) * (1.0 - smoothstep(0.55, 1.0, h));
-    return max(0.0, f - 0.74) * hg * 3.4;
+    return max(0.0, f - 0.80) * hg * 5.0;
   }
 
   // --- SHADER DE CÉU ATMOSFÉRICO & DISCO SOLAR ---
@@ -1027,17 +1038,17 @@ ${ISLAND_WGSL}
     let sunGlow = pow(sunAmt, 5.0) * 0.22 * (0.4 + golden * 0.6);
     col += frame.sunColor.xyz * (sunDisc + sunHalo + sunGlow) * max(elev + 0.15, 0.0);
 
-    // Nuvens volumétricas raymarchadas (camada 45m–115m): Beer + luz solar marchada
+    // Nuvens volumétricas raymarchadas (camada 240m–420m): Beer + luz solar marchada
     if (rayDir.y > 0.015) {
       let camP = frame.cameraPos.xyz;
-      let tA = (45.0 - camP.y) / rayDir.y;
-      let tB = (115.0 - camP.y) / rayDir.y;
+      let tA = (240.0 - camP.y) / rayDir.y;
+      let tB = (420.0 - camP.y) / rayDir.y;
       var t0 = max(tA, 0.0);
       var t1 = min(tB, t0 + 400.0);
       if (t1 > t0) {
         var T = 1.0;
         var acc = vec3<f32>(0.0);
-        let STEPS = 44;
+        let STEPS = 32;
         let dt = (t1 - t0) / f32(STEPS);
         // Jitter por pixel: elimina bandas/contornos da marcha
         let jit = fract(sin(dot(in.clipPos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
@@ -1050,7 +1061,7 @@ ${ISLAND_WGSL}
             var dL = 0.0;
             dL += cloudDens(p + L * 5.0);
             dL += cloudDens(p + L * 12.0);
-            let litF = exp(-dL * 0.16);
+            let litF = exp(-dL * 0.22);
             // Ambiente branco-azulado (luz do céu espalhada), não cinza-chumbo
             let amb = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62 + vec3<f32>(0.10);
             let sun = frame.sunColor.xyz * (1.7 * pow(litF, 1.4) + 0.10) * max(dayAmt, 0.06);
@@ -1062,7 +1073,7 @@ ${ISLAND_WGSL}
             T *= exp(-d * 0.55 * dt);
           }
         }
-        let fade = exp(-t0 * 0.0016) * smoothstep(0.015, 0.12, rayDir.y);
+        let fade = exp(-t0 * 0.0005) * smoothstep(0.015, 0.12, rayDir.y);
         col = col * mix(1.0, T, fade) + acc * fade;
       }
     }

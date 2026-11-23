@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { deflateSync, inflateSync, crc32 } from 'node:zlib';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-export const PORT = 3000;
+// O projeto roda sempre na porta 3000; BBC_PORT existe só para testar os próprios scripts
+export const PORT = parseInt(process.env.BBC_PORT || 3000, 10);
 export const URL_APP = `http://localhost:${PORT}`;
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -49,16 +50,24 @@ export async function startServer() {
       res.writeHead(404).end('404');
     }
   });
-  const started = await new Promise((ok, fail) => {
-    server.once('error', (e) => (e.code === 'EADDRINUSE' ? ok(false) : fail(e)));
-    server.listen(PORT, '127.0.0.1', () => ok(true));
-  });
-  if (started) return { reused: false, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }) };
-  const probe = await fetch(`${URL_APP}/src/main.js`).then((r) => r.ok && r.text(), () => false);
-  if (!probe || !probe.includes('BigBuckApp')) {
-    throw new Error(`Porta ${PORT} ocupada por outro processo que não serve este projeto. Libere-a (lsof -i :${PORT}) e rode de novo.`);
+  // Um servidor do usuário em *:3000 não impede o listen em 127.0.0.1 — e o
+  // navegador cairia nele. Por isso a porta é sondada antes de abrir a nossa
+  const same = async (f) => {
+    const remote = await fetch(`${URL_APP}/${f}`, { cache: 'no-store' }).then((r) => (r.ok ? r.text() : ''), () => null);
+    return remote === null ? null : remote === await readFile(join(ROOT, f), 'utf8');
+  };
+  const probe = await same('src/main.js');
+  if (probe !== null) {
+    if (!probe || !(await same('src/shaders.js')) || !(await same('src/world.js'))) {
+      throw new Error(`A porta ${PORT} já está em uso por um servidor que não serve ${ROOT}. Encerre-o (lsof -nP -iTCP:${PORT} -sTCP:LISTEN) e rode de novo.`);
+    }
+    return { reused: true, close: async () => {} };
   }
-  return { reused: true, close: async () => {} };
+  await new Promise((ok, fail) => {
+    server.once('error', fail);
+    server.listen(PORT, ok);
+  });
+  return { reused: false, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }) };
 }
 
 function chromePath() {
@@ -234,8 +243,7 @@ export async function openApp({ width = 1280, height = 720, quality = null } = {
       await sleep(1000);
     }
   }
-  const gpu = await page.evaluate(`window.__bbc || { wgsl: [], gpu: [] }`).catch(() => ({ wgsl: [], gpu: [] }));
-  return { page, server, log, pill, ready, close, readGpu: () => page.evaluate(`window.__bbc`) , gpu };
+  return { page, server, log, pill, ready, close, readGpu: () => page.evaluate(`window.__bbc`) };
 }
 
 // ----------------------------------------------------------------------------

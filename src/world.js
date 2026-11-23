@@ -14,6 +14,9 @@ const smooth01 = (t) => { const c = Math.min(1, Math.max(0, t)); return c * c * 
 // inteira sem pagar por ela a cada frame
 export const GRID_N = 80;
 
+// Altura do fuste da árvore rubra (m, em escala 1): o tronco e a copa partem dela
+const RED_TREE_HEIGHT = 9.0;
+
 // Lista de instâncias (8 floats: x, y, z, escala, rotY, fase, tint, vento)
 // que guarda também a célula de cada uma
 class InstanceList {
@@ -262,7 +265,7 @@ export class ForestWorld {
 
   // Material IDs: 0 = Terreno/Musgo, 1 = Casca A, 2 = Folhagem/Copa,
   // 3 = Samambaia/Grama, 4 = Rocha, 5 = Cogumelo, 6 = Água, 7 = Folha redonda,
-  // 8 = Casca B (emergente), 9 = Tronco caído
+  // 8 = Casca B (emergente), 9 = Tronco caído, 10 = Folha rubra
   buildTerrainMesh(resolution) {
     const size = this.worldSize;
     const half = size * 0.5;
@@ -473,16 +476,18 @@ export class ForestWorld {
 
   // Árvore ancestral com sapopembas (raízes tabulares), tronco tortuoso e galhos primários/secundários
   // variant 0: copaíba robusta e tortuosa | variant 1: emergente alta e esbelta
+  // variant 2: árvore rubra do campo — fuste curto e galhos abertos sob a copa redonda
   // lod 1: só o fuste em 40 triângulos — árvores além do alcance de detalhe
   buildTreeTrunkMesh(variant = 0, lod = 0) {
     const isSlim = variant === 1;
-    const treeHeight = isSlim ? 21.0 : 16.5;
-    const baseRadius = isSlim ? 0.50 : 0.68;
+    const isRed = variant === 2;
+    const treeHeight = isRed ? RED_TREE_HEIGHT : (isSlim ? 21.0 : 16.5);
+    const baseRadius = isRed ? 0.56 : (isSlim ? 0.50 : 0.68);
     const taperPow = isSlim ? 1.02 : 1.12;
-    const flareStrength = isSlim ? 0.32 : 0.75;
-    const swayX = isSlim ? 0.28 : 0.45;
-    const swayZ = isSlim ? 0.22 : 0.36;
-    const barkBase = isSlim ? [0.12, 0.11, 0.09] : [0.15, 0.11, 0.08];
+    const flareStrength = isRed ? 0.42 : (isSlim ? 0.32 : 0.75);
+    const swayX = isRed ? 0.34 : (isSlim ? 0.28 : 0.45);
+    const swayZ = isRed ? 0.26 : (isSlim ? 0.22 : 0.36);
+    const barkBase = isRed ? [0.10, 0.075, 0.065] : (isSlim ? [0.12, 0.11, 0.09] : [0.15, 0.11, 0.08]);
     const positions = [];
     const normals = [];
     const colors = [];
@@ -579,7 +584,14 @@ export class ForestWorld {
     addBranch(trunkPts, trunkRadii, 14, flareStrength);
 
     // Galhos primários: a copaíba ramifica cedo e baixo; a emergente só no topo
-    const branchConfigs = isSlim ? [
+    const branchConfigs = isRed ? [
+      { startT: 0.36, angle: 0.4, len: 5.2, pitch: 0.50 },
+      { startT: 0.44, angle: 2.5, len: 5.4, pitch: 0.48 },
+      { startT: 0.52, angle: 4.5, len: 5.0, pitch: 0.55 },
+      { startT: 0.62, angle: 1.4, len: 4.4, pitch: 0.66 },
+      { startT: 0.72, angle: 3.5, len: 3.8, pitch: 0.78 },
+      { startT: 0.82, angle: 5.6, len: 3.2, pitch: 0.90 }
+    ] : isSlim ? [
       { startT: 0.62, angle: 0.6, len: 4.4, pitch: 0.55 },
       { startT: 0.70, angle: 2.4, len: 4.6, pitch: 0.52 },
       { startT: 0.77, angle: 4.3, len: 4.0, pitch: 0.60 },
@@ -636,6 +648,7 @@ export class ForestWorld {
 
   // Copa multicamadas composta por dezenas de raminhos/folhas cruzadas em 3D (substitui esferas simples)
   // variant 0: folha lanceolada verde-viva | variant 1: folha arredondada verde-oliva (matId 7)
+  // variant 2: folha arredondada rubra (matId 10) — a árvore vermelha do campo
   // lod 1: as mesmas folhas em cartões planos (2 triângulos cada; o recorte
   // vem do alpha test) — 6× mais leve, para a meia distância e as sombras
   // lod 2: ramalhete distante — menos cartões, maiores — para as copas além
@@ -647,7 +660,8 @@ export class ForestWorld {
     const uvs = [];
     const indices = [];
 
-    const isRound = variant === 1;
+    const isRed = variant === 2;
+    const isRound = variant >= 1;
     const rng = new PRNG(9012);
     // ramalhetes pequenos com orientação variada = massa de folhagem densa
     const leafCards = lod === 2 ? 26 : (isRound ? 44 : 54);
@@ -693,9 +707,15 @@ export class ForestWorld {
       // Variação de matiz: verde profundo -> verde-lima / verde-oliva, com folhas secas ocasionais
       const warm = rng.next();
       const dry = rng.next() < 0.10;
-      const r = (isRound ? 0.065 : 0.05) + sunGrad * (isRound ? 0.13 : 0.11) + warm * 0.035 + (dry ? 0.10 : 0) + rng.range(-0.01, 0.015);
-      const g = (isRound ? 0.13 : 0.14) + sunGrad * (isRound ? 0.25 : 0.27) + rng.range(-0.02, 0.035) + (dry ? 0.02 : 0);
-      const b = (isRound ? 0.035 : 0.04) + sunGrad * 0.045 + rng.range(-0.008, 0.008) - (dry ? 0.012 : 0);
+      let r = (isRound ? 0.065 : 0.05) + sunGrad * (isRound ? 0.13 : 0.11) + warm * 0.035 + (dry ? 0.10 : 0) + rng.range(-0.01, 0.015);
+      let g = (isRound ? 0.13 : 0.14) + sunGrad * (isRound ? 0.25 : 0.27) + rng.range(-0.02, 0.035) + (dry ? 0.02 : 0);
+      let b = (isRound ? 0.035 : 0.04) + sunGrad * 0.045 + rng.range(-0.008, 0.008) - (dry ? 0.012 : 0);
+      if (isRed) {
+        // Carmim profundo na sombra -> vermelho vivo ao sol; folhas secas puxam ao ferrugem
+        r = 0.20 + sunGrad * 0.34 + warm * 0.10;
+        g = 0.022 + sunGrad * 0.040 + (dry ? 0.07 : 0) + warm * 0.012;
+        b = 0.030 + sunGrad * 0.030 - (dry ? 0.015 : 0);
+      }
 
       const baseV = positions.length / 3;
       if (lod) {
@@ -771,7 +791,7 @@ export class ForestWorld {
       }
     }
 
-    return this.packMesh(positions, normals, colors, uvs, indices, isRound ? 7.0 : 2.0);
+    return this.packMesh(positions, normals, colors, uvs, indices, isRed ? 10.0 : (isRound ? 7.0 : 2.0));
   }
 
   // Samambaia arqueada detalhada com múltiplos segmentos por fronde
@@ -1073,6 +1093,9 @@ export class ForestWorld {
     const rocks = new InstanceList(preset.rocks * 2);
     const logs = new InstanceList(preset.fallenLogs);
     const mushrooms = new InstanceList(preset.mushrooms);
+    const trunksC = new InstanceList(preset.redTrees);
+    const canopiesC = new InstanceList(preset.redFoliageClusters);
+    const canopiesCFar = new InstanceList(preset.redTrees * 5);
 
     // Sorteia um ponto da ilha proporcionalmente à densidade de mata
     // (rejeição sobre candidatos uniformes): sub-bosque e troncos caídos
@@ -1216,7 +1239,7 @@ export class ForestWorld {
     // projeção da rocha sobre a malha renderizada — nunca fica no ar.
     const rockTarget = Math.floor(preset.rocks * 1.6);
     for (let i = 0; i < rockTarget; i++) {
-      const nearStream = i < rockTarget * 0.35;
+      const nearStream = i < rockTarget * 0.22;
       let x, z;
       if (nearStream) {
         const rp = riverPoint(rng.next());
@@ -1245,9 +1268,12 @@ export class ForestWorld {
       // Vertente íngreme demais: um bloco solto não repousaria ali
       if (maxH - minH > 1.5 * scale) continue;
       // Base do mesh ≈ -0.56·scale: o fundo fica ~0.26·scale sob o ponto
-      // mais baixo e a aba do elipsoide toca o solo na borda da projeção
+      // mais baixo e a aba do elipsoide toca o solo na borda da projeção.
+      // Rocha dentro do canal leva tint negativo: o sinal vira flag no
+      // shader (hueJit < 0) e rende cinza úmido, sem musgo
+      const inRiver = this.riverMask(x, z) > 0.5;
       rocks.push(cellOf(x, minH, z), x, minH + 0.30 * scale, z,
-        scale, rng.range(0, Math.PI * 2), 0, rng.range(0.85, 1.15), 0.0);
+        scale, rng.range(0, Math.PI * 2), 0, rng.range(0.85, 1.15) * (inRiver ? -1 : 1), 0.0);
     }
 
     // 5. Troncos Caídos + Aglomerados de Cogumelos Bioluminescentes (só na mata)
@@ -1295,6 +1321,87 @@ export class ForestWorld {
       spores[i * 4 + 3] = rng.range(0, Math.PI * 2);
     }
 
+    // 7. Árvores Rubras — espalhadas pela ilha inteira: acentos dentro da
+    // mata (a copa vermelha aparece entre as verdes), beira dos rios,
+    // clareiras e o prado do sopé acima da linha das árvores. As primeiras
+    // tentativas caem em volta do ponto de partida, para haver algumas à
+    // vista de quem chega
+    const redClusters = Math.max(12, Math.floor(preset.redFoliageClusters / preset.redTrees));
+    const redGap = 16.0, redX = [], redZ = [];
+    const redTries = preset.redTrees * 300;
+    for (let i = redTries; i > 0 && trunksC.count < preset.redTrees; i--) {
+      let x, z;
+      if (trunksC.count < 4 && i > redTries * 0.9) {
+        const a = rng.range(0, Math.PI * 2), d = rng.range(22.0, 90.0);
+        x = this.spawn.cam[0] + Math.sin(a) * d;
+        z = this.spawn.cam[1] + Math.cos(a) * d;
+      } else if (rng.next() < 0.3) {
+        // Margem: parte de um ponto do rio e desce a perpendicular até a
+        // faixa onde o leito abre mas a mata não fechou de volta (riverMask 0.42–0.62)
+        const rt = rng.next();
+        const rp = riverPoint(rt), rq = riverPoint(Math.min(1.0, rt + 0.002));
+        const tl = Math.hypot(rq[0] - rp[0], rq[1] - rp[1]) || 1;
+        const side = rng.next() < 0.5 ? 1.0 : -1.0;
+        const px = -(rq[1] - rp[1]) / tl * side, pz = (rq[0] - rp[0]) / tl * side;
+        let off = -1;
+        for (let d = 6.0; d <= 70.0 && off < 0; d += 4.0) {
+          if (this.riverMask(rp[0] + px * d, rp[1] + pz * d) >= 0.62) continue;
+          // Bisseção até o meio da faixa (~2 m de largura: o passo de 4 m pula ela)
+          let lo = d - 4.0, hi = d;
+          for (let k = 0; k < 7; k++) {
+            const mid = (lo + hi) * 0.5;
+            if (this.riverMask(rp[0] + px * mid, rp[1] + pz * mid) >= 0.52) lo = mid; else hi = mid;
+          }
+          off = (lo + hi) * 0.5;
+        }
+        if (off < 0 || this.riverMask(rp[0] + px * off, rp[1] + pz * off) <= 0.42) continue;
+        x = rp[0] + px * off + rng.range(-2.0, 2.0);
+        z = rp[1] + pz * off + rng.range(-2.0, 2.0);
+      } else {
+        x = rng.range(-half, half);
+        z = rng.range(-half, half);
+      }
+      if (this.shoreDist(x, z) < S * 0.04) continue;
+      const rm = this.riverMask(x, z);
+      if (rm >= 0.62 || (rm >= 0.2 && rm <= 0.42)) continue;
+      const y = this.getMeshHeight(x, z, res, meshCache);
+      if (rm > 0.42 ? y < this.waterLevel + 0.1 : (y < -2.1 || y > 26.0)) continue;
+      if (Math.hypot(x - this.spawn.cam[0], z - this.spawn.cam[1]) < 14.0) continue;
+      if (crowded(x, z)) continue;
+      let close = false;
+      for (let k = 0; k < redX.length && !close; k++) close = Math.hypot(redX[k] - x, redZ[k] - z) < redGap;
+      if (close) continue;
+      if (1.0 - this.getTerrainNormal(x, z)[1] > 0.2) continue;
+
+      const scale = rng.range(0.85, 1.3);
+      const rotY = rng.range(0, Math.PI * 2);
+      const phase = rng.range(0, 100);
+      const cell = cellOf(x, y, z);
+      redX.push(x); redZ.push(z);
+      trunksC.push(cell, x, y - 0.35, z, scale, rotY, phase, rng.range(0.85, 1.15), 0.0);
+
+      // Copa: ramalhetes num elipsoide achatado, concentrados na casca
+      const crownY = y + RED_TREE_HEIGHT * scale * 0.94;
+      const crownR = 5.3 * scale, crownH = 3.7 * scale;
+      for (let c = 0; c < redClusters; c++) {
+        const a = rng.range(0, Math.PI * 2);
+        const up = rng.range(-0.55, 1.0);
+        const ring = Math.sqrt(1.0 - up * up);
+        const rad = Math.pow(rng.next(), 0.45);
+        canopiesC.push(cell,
+          x + Math.cos(a) * ring * rad * crownR, crownY + up * rad * crownH, z + Math.sin(a) * ring * rad * crownR,
+          rng.range(1.5, 2.3) * scale, rng.range(0, Math.PI * 2), phase + c * 0.65, rng.range(0.78, 1.28), 1.0);
+      }
+      // Copa distante (LOD): um ramalhete no topo + coroa de quatro
+      for (let c = 0; c < 5; c++) {
+        const a = rotY + c * (Math.PI * 0.5);
+        const dist = c === 0 ? 0.0 : 3.4 * scale;
+        canopiesCFar.push(cell,
+          x + Math.cos(a) * dist, crownY + (c === 0 ? 1.6 : 0.0) * scale, z + Math.sin(a) * dist,
+          3.3 * scale, rotY + c * 2.1, phase + c * 0.65, 0.9 + 0.25 * ((phase * 0.37 + c * 0.31) % 1), 1.0);
+      }
+    }
+
     // Esfera envolvente de cada célula: o piso ocupado + a altura das
     // árvores e a copa que avança sobre as vizinhas (raio 0 = célula vazia)
     const centerY = new Float32Array(cellCount);
@@ -1319,7 +1426,8 @@ export class ForestWorld {
       canopiesA: [canopiesA, 'canopyACount'], canopiesB: [canopiesB, 'canopyBCount'],
       canopiesAFar: [canopiesAFar, 'canopyAFarCount'], canopiesBFar: [canopiesBFar, 'canopyBFarCount'],
       ferns: [ferns, 'fernCount'], grasses: [grasses, 'grassCount'],
-      rocks: [rocks, 'rockCount'], logs: [logs, 'logCount'], mushrooms: [mushrooms, 'mushroomCount']
+      rocks: [rocks, 'rockCount'], logs: [logs, 'logCount'], mushrooms: [mushrooms, 'mushroomCount'],
+      trunksC: [trunksC, 'trunkCCount'], canopiesC: [canopiesC, 'canopyCCount'], canopiesCFar: [canopiesCFar, 'canopyCFarCount']
     };
     for (const name in lists) {
       const packed = lists[name][0].pack(cellCount);

@@ -161,7 +161,7 @@ export async function staticChecks() {
       }
       for (const n of lay.keys()) if (!sh.has(n)) warnings.push(`${layoutName}: binding ${n} existe no layout mas não é declarado em ${label}.`);
     }
-    const group = between(main, 'layout: this.mainBindGroupLayout,', ']');
+    const group = between(main, 'layout: this.mainBindGroupLayout,', '});');
     const lay = layoutBindings('mainBindGroupLayout');
     if (!group || !lay) { errors.push('Não achei o bind group principal (rebuildShadowTexture).'); return; }
     const entries = [...group.matchAll(/binding:\s*(\d+)/g)].map((m) => +m[1]);
@@ -246,8 +246,8 @@ export async function staticChecks() {
       const x = ((i * 0.618034) % 1 - 0.5) * S, z = ((i * 0.754878) % 1 - 0.5) * S;
       if (!Number.isFinite(a.w.getTerrainHeight(x, z))) { errors.push(`getTerrainHeight(${x.toFixed(1)}, ${z.toFixed(1)}) devolveu NaN/Infinity.`); break; }
     }
-    const [sx, sz] = a.w.spawn.cam, sh = a.w.getTerrainHeight(sx, sz);
-    if (sh < a.w.waterLevel) errors.push(`A câmera inicial (${sx.toFixed(1)}, ${sz.toFixed(1)}) nasce debaixo d'água: terreno ${sh.toFixed(2)} < nível ${a.w.waterLevel}.`);
+    const [sx, sz] = a.w.spawn.cam;
+    if (!(a.w.shoreDist(sx, sz) > 0)) errors.push(`A câmera inicial (${sx.toFixed(1)}, ${sz.toFixed(1)}) nasce fora da ilha (shoreDist <= 0).`);
     if (a.w.getTerrainHeight(S * 0.49, S * 0.49) > a.w.waterLevel) errors.push('O canto do mapa está acima do nível do mar — a ilha vaza da borda do mundo.');
   });
 

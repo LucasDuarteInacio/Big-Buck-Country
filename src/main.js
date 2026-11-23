@@ -22,6 +22,8 @@ const INSTANCE_LAYERS = [
   ['trunkB', 'trunksB', 'solid', 'tree', true],
   ['trunkAFar', 'trunksA', 'solid', 'far', false],
   ['trunkBFar', 'trunksB', 'solid', 'far', false],
+  ['trunkC', 'trunksC', 'solid', 'tree', true],
+  ['trunkCFar', 'trunksC', 'solid', 'far', false],
   ['rock', 'rocks', 'solid', 'all', true],
   ['log', 'logs', 'solid', 'tree', true],
   ['mushroom', 'mushrooms', 'solid', 'under', false],
@@ -31,6 +33,9 @@ const INSTANCE_LAYERS = [
   ['canopyBMid', 'canopiesB', 'foliage', 'mid', true],
   ['canopyAFar', 'canopiesAFar', 'foliage', 'far', false],
   ['canopyBFar', 'canopiesBFar', 'foliage', 'far', false],
+  ['canopyC', 'canopiesC', 'foliage', 'near', false],
+  ['canopyCMid', 'canopiesC', 'foliage', 'mid', true],
+  ['canopyCFar', 'canopiesCFar', 'foliage', 'far', false],
   ['fern', 'ferns', 'foliage', 'under', false],
   ['grass', 'grasses', 'foliage', 'under', false]
 ];
@@ -105,7 +110,7 @@ class WebGPURenderer {
         const tex = this.device.createTexture({
           size: [bmp.width, bmp.height],
           format: 'rgba8unorm',
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
         });
         this.device.queue.copyExternalImageToTexture({ source: bmp }, { texture: tex }, [bmp.width, bmp.height]);
         this.textureViews.push(tex.createView());
@@ -793,7 +798,7 @@ export class BigBuckApp {
       yaw: this.world.spawn.yaw,
       pitch: 0.06,
       vel: [0, 0, 0],
-      flyOffset: 0
+      flying: false
     };
 
     this.keys = new Set();
@@ -855,6 +860,11 @@ export class BigBuckApp {
       canopyBMid: this.world.buildCanopyClusterMesh(1, 1),
       canopyAFar: this.world.buildCanopyClusterMesh(0, 2),
       canopyBFar: this.world.buildCanopyClusterMesh(1, 2),
+      trunkC: this.world.buildTreeTrunkMesh(2),
+      trunkCFar: this.world.buildTreeTrunkMesh(2, 1),
+      canopyC: this.world.buildCanopyClusterMesh(2),
+      canopyCMid: this.world.buildCanopyClusterMesh(2, 1),
+      canopyCFar: this.world.buildCanopyClusterMesh(2, 2),
       fern: this.world.buildFernMesh(),
       grass: this.world.buildGrassMesh(),
       rock: this.world.buildRockMesh(),
@@ -863,7 +873,7 @@ export class BigBuckApp {
     };
     const instances = this.world.generateInstances(preset);
     this.renderer.uploadScene(meshes, instances, preset.shadowRes);
-    document.getElementById('val-instances').textContent = `${preset.label} (${instances.trunkACount + instances.trunkBCount} árvores)`;
+    document.getElementById('val-instances').textContent = `${preset.label} (${instances.trunkACount + instances.trunkBCount + instances.trunkCCount} árvores)`;
     document.getElementById('seed-badge').textContent = `#${this.world.seed}`;
   }
 
@@ -928,6 +938,7 @@ export class BigBuckApp {
     });
 
     window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') e.preventDefault();
       this.keys.add(e.code);
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
         if (this.autoTour) this.setAutoTour(false);
@@ -1102,13 +1113,29 @@ export class BigBuckApp {
     this.cam.pos[0] = Math.max(-limit, Math.min(limit, this.cam.pos[0] + this.cam.vel[0] * dt));
     this.cam.pos[2] = Math.max(-limit, Math.min(limit, this.cam.pos[2] + this.cam.vel[2] * dt));
 
-    if (this.keys.has('Space')) this.cam.flyOffset = Math.min(120.0, this.cam.flyOffset + dt * 14.0);
-    if (this.keys.has('KeyC')) this.cam.flyOffset = Math.max(0.0, this.cam.flyOffset - dt * 14.0);
+    if (this.keys.has('Space') || this.keys.has('KeyC')) this.cam.flying = true;
 
     const groundY = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
-    const bob = len > 0.1 && this.cam.flyOffset < 0.2 ? Math.sin(elapsedSec * 9.5) * 0.055 : 0;
-    const targetY = Math.max(groundY, -2.1) + 1.85 + this.cam.flyOffset + bob;
-    this.cam.pos[1] += (targetY - this.cam.pos[1]) * damping;
+    if (this.cam.flying) {
+      // Voo livre: Espaço sobe, C desce — a altura não segue mais o relevo
+      let moveY = 0;
+      if (this.keys.has('Space')) moveY += speed * 1.75;
+      if (this.keys.has('KeyC')) moveY -= speed * 1.75;
+      this.cam.vel[1] += (moveY - this.cam.vel[1]) * damping;
+      this.cam.pos[1] = Math.min(600.0, this.cam.pos[1] + this.cam.vel[1] * dt);
+      // Não atravessa o relevo nem o fundo do mar
+      const minY = groundY + 0.6;
+      if (this.cam.pos[1] < minY) { this.cam.pos[1] = minY; this.cam.vel[1] = 0; }
+      // Pousa ao descer até a altura de caminhada em terra firme ou água rasa
+      if (moveY <= 0 && groundY > -2.1 && this.cam.pos[1] <= groundY + 1.85) {
+        this.cam.flying = false;
+        this.cam.vel[1] = 0;
+      }
+    } else {
+      const bob = len > 0.1 ? Math.sin(elapsedSec * 9.5) * 0.055 : 0;
+      const targetY = Math.max(groundY, -2.1) + 1.85 + bob;
+      this.cam.pos[1] += (targetY - this.cam.pos[1]) * damping;
+    }
   }
 
   computeAtmosphere() {
