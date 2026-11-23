@@ -37,6 +37,7 @@ export const WGSL_SHADERS = /* wgsl */`
   @group(0) @binding(13) var texGranite: texture_2d<f32>;
   @group(0) @binding(14) var texGray: texture_2d<f32>;
   @group(0) @binding(15) var texWood: texture_2d<f32>;
+  @group(0) @binding(16) var texSand: texture_2d<f32>;
   @group(0) @binding(8) var texSamp: sampler;
 
   // Amostra sRGB -> linear (LOD explícito: seguro dentro de branches por material)
@@ -118,6 +119,33 @@ export const WGSL_SHADERS = /* wgsl */`
       a *= 0.5;
     }
     return v;
+  }
+
+  // Leito do rio: sedimento fino com moitas de pedra. O fundo padrão é
+  // liso e a foto de seixos só aparece em aglomerados — escala fixa por
+  // amostra (escala contínua vira anéis concêntricos)
+  fn riverBedTex(p: vec2<f32>) -> vec3<f32> {
+    let warp = vec2<f32>(
+      noise3D(vec3<f32>(p.x * 0.55, 1.3, p.y * 0.55)),
+      noise3D(vec3<f32>(p.y * 0.55, 7.9, p.x * 0.55))) - 0.5;
+    let q = p + warp * 1.5;
+    let a = texLin(texWet, q * 0.30);
+    let b = texLin(texWet, vec2<f32>(q.y, -q.x) * 0.17 + vec2<f32>(0.41, 0.73));
+    let c = texLin(texWet, vec2<f32>(q.x + q.y, q.y - q.x) * 0.32 + vec2<f32>(0.13, 0.57));
+    // trechos (~20 m) de pedra graúda ou miúda
+    let zone = fbm3(vec3<f32>(p.x * 0.05, 11.0, p.y * 0.05));
+    var st = mix(a, c, smoothstep(0.42, 0.52, zone));
+    st = mix(st, b, 1.0 - smoothstep(0.30, 0.44, zone));
+    // pedra só onde o rio deposita cascalho: moitas de ~10 m separadas
+    // por fundo limpo — fim do tapete uniforme de pedrinhas
+    let cover = smoothstep(0.50, 0.66, fbm3(vec3<f32>(p.x * 0.10, 4.2, p.y * 0.10)));
+    // sedimento: luminância da mesma foto em escala bem maior (borrada)
+    let sedLum = dot(texLin(texWet, q * 0.045), vec3<f32>(0.33));
+    var t = mix(vec3<f32>(sedLum) * vec3<f32>(0.64, 0.60, 0.48), st, cover);
+    // manchas de seixo de praia dentro dos aglomerados
+    let alt = smoothstep(0.55, 0.75, fbm3(vec3<f32>(p.x * 0.09, 9.4, p.y * 0.09)));
+    t = mix(t, texLin(texGround, q * 0.42), alt * 0.55 * cover);
+    return t;
   }
 
   // --- ÁGUA CORRENTE ("Where the River Goes" / P_Malin, adaptado) ---
@@ -289,6 +317,25 @@ ${ISLAND_WGSL}
     var f = fbmDXY(uv * 9.0, flowOff * 15.0, 0.8, -0.5).z;
     f = max(0.0, (f - 0.2) / 0.2);
     return pow(0.5, f);
+  }
+
+  // Arrebentação (GetShorelineWaves do Castaway, wt3XDj — P_Malin):
+  // ondas rasas correndo para a praia. Retorna (altura do swash ~m,
+  // espuma logo atrás da crista). A fase avança com a profundidade → a
+  // crista viaja mar → areia; a amplitude morre com exp(-d·0.7) e é
+  // modulada por ruído ao longo da costa — ondas chegam em grupos
+  fn shoreWaves(pos: vec2<f32>, dh: f32, t: f32) -> vec2<f32> {
+    let d = max(dh, 0.0);
+    var p = d * 8.0 + t * 1.5;
+    let nz = vec2<f32>(
+      worldNoise2D(pos.x * 0.1, pos.y * 0.1),
+      worldNoise2D(pos.x * 0.1 + 13.7, pos.y * 0.1 - 7.1)
+    );
+    p += nz.x * 4.0;
+    let waveMag = exp(-d * 0.7);
+    let sw = sin(p + cos(p) * (1.0 - waveMag)) * -0.5 + 0.5;
+    let fm = sin(p - 2.67) * 0.5 + 0.5;
+    return vec2<f32>(sw * sqrt(waveMag), fm * waveMag) * nz.y;
   }
 
   // --- CAMADA DE NUVENS PROCEDURAIS (plano a 240m, FBM rotacionado advectado pelo vento) ---
@@ -504,6 +551,7 @@ ${ISLAND_WGSL}
     var wFoamBlend = 0.0;
     var wH = 0.5;
     var wSea = 0.0;
+    var wSwash = 0.0;
 
     let mat = i32(in.matId + 0.5);
     let distToCam = length(in.worldPos - frame.cameraPos.xyz);
@@ -557,21 +605,34 @@ ${ISLAND_WGSL}
       let slope = 1.0 - clamp(in.worldNormal.y, 0.0, 1.0);
       let rockAmt = smoothstep(0.28, 0.55, slope);
       if (rockAmt > 0.0) {
-        let bandN = fbm3(wp * vec3<f32>(0.55, 0.22, 0.55) + vec3<f32>(7.7));
-        let band = 0.5 + 0.5 * sin(wp.y * 2.6 + bandN * 7.0);
+        // Grão de rocha por ruído esticado 40x em y (fdlyW4: textura de ruído
+        // em vec2(pos.x, pos.y*48)) — decorrelaciona linha a linha. A foto de
+        // rocha projetada em v=altitude repetia as bandas da imagem a cada
+        // ~5m e lia como artefato de impressão
+        let grainY = texLin(texGray, vec2<f32>(wp.x * 0.6 + wp.z * 0.4, wp.y * 40.0) * 0.025).r;
         let rockGrain = noise3D(wp * 26.0);
-        // Textura de rocha real projetada verticalmente: estratos seguem a altitude
-        let rt = texLin(texRock, vec2<f32>(wp.x * 0.6 + wp.z * 0.4, wp.y * 0.9) * 0.20);
-        let rockCol = rt * (0.40 + 0.85 * band) * (0.72 + 0.56 * rockGrain);
-        albedo = mix(albedo, rockCol, rockAmt * 0.9);
+        let strata = fbm3(wp * vec3<f32>(0.10, 0.35, 0.10) + vec3<f32>(7.7));
+        albedo *= mix(vec3<f32>(1.0), vec3<f32>(0.78 + 0.50 * grainY) * (0.80 + 0.42 * strata), rockAmt * 0.9);
+        albedo *= 1.0 + (rockGrain - 0.5) * 0.55 * rockAmt;
         roughness = mix(roughness, 0.88, rockAmt);
-        bump += (band * 0.22 + dot(rt, vec3<f32>(0.33)) * 0.3) * rockAmt;
+        bump += (grainY * 0.5 + rockGrain * 0.25 + strata * 0.15) * rockAmt;
       }
 
       // Máscaras de cobertura vindas do world.js no uv do terreno:
       // x = areia de praia, y = campo aberto entre os capões de mata
       let sand = clamp(in.uv.x, 0.0, 1.0);
       let meadow = clamp(in.uv.y, 0.0, 1.0);
+
+      // Areia com grão de verdade: a textura dá a estrutura do grão e a
+      // cor do vértice mantém o tom (seca clara → molhada dourada →
+      // baixio escuro). st/0.416 ≈ 1 na média — o grão atravessa sem
+      // deslocar a paleta
+      if (sand > 0.0) {
+        let st = texLin(texSand, wp.xz * 0.5);
+        let stLum = dot(st, vec3<f32>(0.33));
+        albedo *= mix(vec3<f32>(1.0), st / 0.416, sand * 0.85);
+        bump += stLum * 0.6 * sand;
+      }
 
       // Chão do vale: serrapilheira + galharia fotográficas (só em baixa altitude
       // e encosta suave — não nas encostas rochosas do maciço, nem na areia
@@ -594,15 +655,27 @@ ${ISLAND_WGSL}
       let wetLine = 1.0 - smoothstep(-2.0, -0.9, wp.y);
       let wet = wetLine * (1.0 - sand);
       if (wet > 0.0) {
-        let ws = texLin(texWet, wp.xz * 0.30);
+        let ws = riverBedTex(wp.xz);
         let wsLum = dot(ws, vec3<f32>(0.33));
         albedo = mix(albedo, ws * 0.80, wet * 0.75);
         roughness = mix(roughness, 0.28, wet * 0.8);
         bump += wsLum * 0.45 * wet;
       }
-      let wetSand = wetLine * sand;
-      albedo *= 1.0 - 0.36 * wetSand;
-      roughness = mix(roughness, 0.36, wetSand * 0.8);
+      // Areia molhada (Castaway): mais escura e quase espelhada. A borda
+      // superior da faixa úmida acompanha o alcance recente da
+      // arrebentação — mesma shoreWaves que move a linha d'água, então
+      // a areia que a onda acabou de lamber continua úmida e brilhante
+      var wetSand = wetLine * sand;
+      if (sand > 0.001 && wp.y < -0.8) {
+        let tW = frame.params.x;
+        let reach = -2.38 + 0.25 + 0.9 * max(max(
+          shoreWaves(wp.xz, 0.0, tW - 0.05).x,
+          shoreWaves(wp.xz, 0.0, tW - 0.85).x),
+          shoreWaves(wp.xz, 0.0, tW - 1.7).x);
+        wetSand = max(wetSand, (1.0 - smoothstep(reach - 0.45, reach, wp.y)) * sand);
+      }
+      albedo *= 1.0 - 0.50 * wetSand;
+      roughness = mix(roughness, 0.12, wetSand * 0.9);
     } else if (mat == 1 || mat == 8) {
       // Casca: fissuras verticais profundas, placas rachadas e líquen
       let wp = in.worldPos;
@@ -830,17 +903,27 @@ ${ISLAND_WGSL}
       N = normalize(surf.xyz);
       wH = surf.w;
       wFoam = clamp(wFoam + smoothstep(0.62, 0.95, wH) * 0.5 * seaM, 0.0, 1.0); // whitecaps
+
+      // Arrebentação de praia: a crista corre para a areia (só na orla
+      // do mar — rio não tem onda de praia) e espuma atrás de si
+      var swashH = 0.0;
+      if (depthRaw < 3.5 && seaM > 0.25) {
+        let sw = shoreWaves(wp.xz, depthRaw, t);
+        swashH = sw.x * 0.9;
+        wFoam = clamp(wFoam + sw.y * 0.55, 0.0, 1.0);
+      }
       let wFoamTex = mix(
         waterFoamTex(uv0, adv0 * 0.25),
         waterFoamTex(uv1, adv1 * 0.25),
         phase
       );
       wFoamBlend = clamp(1.0 - pow(wFoamTex, wFoam * 5.0 + 0.001), 0.0, 1.0);
-      wDepth = depth;
+      wDepth = depthRaw;
+      wSwash = swashH;
 
-      // Linha d'água viva: a crista da onda decide se o pixel é água —
-      // a margem "lambe" a beira em vez de ser uma reta estática
-      if (depth + (wH - 0.5) * 0.10 < -0.015) { discard; }
+      // Linha d'água viva: swell + swash decidem se o pixel é água — a
+      // lâmina avança e recua sobre a areia em vez de uma reta estática
+      if (depthRaw + (wH - 0.5) * 0.10 + swashH < -0.015) { discard; }
 
       albedo = vec3<f32>(0.0); // difuso vem da refração/espuma na etapa de ambiente
       roughness = mix(0.05, 0.5, wFoamBlend);
@@ -901,14 +984,16 @@ ${ISLAND_WGSL}
     if (mat == 6) {
       // --- Água corrente: refração analítica + reflexo de céu/nuvens ---
       // Lâmina local ondulada pela crista (linha d'água e espuma respiram)
-      let depthW = max(wDepth + (wH - 0.5) * 0.10, 0.0);
+      let depthW = max(wDepth + (wH - 0.5) * 0.10 + wSwash, 0.0);
       let refrDir = refract(-V, N, 1.0 / 1.3333);
       let pathT = depthW / max(-refrDir.y, 0.30);
       let bedPos = in.worldPos + refrDir * pathT;
 
-      // Fundo de seixos molhados (mesma família da zona úmida do terreno)
-      var bedAlb = texLin(texWet, bedPos.xz * 0.30) * 1.05;
-      bedAlb *= 0.70 + 0.60 * noise3D(bedPos * 14.0);
+      // Leito refratado: seixos molhados sob o rio (texWet), areia da
+      // restinga sob o mar (texSand) — wSea separa os dois fundos
+      let sandBed = texLin(texSand, bedPos.xz * 0.5);
+      var bedAlb = mix(riverBedTex(bedPos.xz), sandBed * vec3<f32>(1.18, 1.08, 0.82), wSea) * 1.05;
+      bedAlb *= 0.78 + 0.44 * noise3D(bedPos * 8.0);
       // Sol difuso no fundo sob a mesma sombra PCF + cintilação das cristas
       let caust = 0.80 + 0.45 * wH;
       let bedLight = (frame.sunColor.xyz * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;

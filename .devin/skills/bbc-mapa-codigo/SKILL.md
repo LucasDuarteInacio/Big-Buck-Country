@@ -81,7 +81,7 @@ Formatos fixos:
 
 - **Vértice** (12 floats): posição 3, normal 3, cor 3, uv 2, matId 1. Montado por `packMesh`.
 - **Instância** (8 floats): x, y, z, escala, rotY, fase do vento, tint, peso do vento. Montada por `InstanceList.push`.
-- **Material IDs**: 0 terreno · 1 casca A · 2 folha lanceolada · 3 samambaia/grama · 4 rocha · 5 cogumelo · 6 água · 7 folha redonda · 8 casca B · 9 tronco caído.
+- **Material IDs**: 0 terreno · 1 casca A · 2 folha lanceolada · 3 samambaia/grama · 4 rocha · 5 cogumelo · 6 água · 7 folha redonda · 8 casca B · 9 tronco caído · 10 folha rubra · 11 espuma de rio.
 - **Coordenadas**: metros, origem no centro da ilha, +x leste, +z sul, +y para cima. Nível d'água em `world.waterLevel`.
 
 ## Contratos que quebram em silêncio

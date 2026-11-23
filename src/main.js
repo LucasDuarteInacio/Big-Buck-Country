@@ -101,7 +101,7 @@ class WebGPURenderer {
     const files = [
       'textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png', 'textures/stars.jpg',
       'textures/litter.jpg', 'textures/wetstones.jpg', 'textures/twigs.jpg', 'textures/bark2.jpg',
-      'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg'
+      'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg', 'textures/sand.png'
     ];
     this.textureViews = [];
     for (const f of files) {
@@ -167,7 +167,8 @@ class WebGPURenderer {
         { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-        { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }
+        { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }
       ]
     });
 
@@ -357,7 +358,8 @@ class WebGPURenderer {
         { binding: 12, resource: this.textureViews[8] },
         { binding: 13, resource: this.textureViews[9] },
         { binding: 14, resource: this.textureViews[10] },
-        { binding: 15, resource: this.textureViews[11] }
+        { binding: 15, resource: this.textureViews[11] },
+        { binding: 16, resource: this.textureViews[12] }
       ]
     });
   }
@@ -789,6 +791,7 @@ export class BigBuckApp {
     this.timeOfDay = 0.22;
     this.fogDensity = 0.55;
     this.windStrength = 0.65;
+    this.camSpeed = 1.0;
     this.autoTour = false;
 
     // Câmera inicia na margem da clareira olhando rio acima, para o maciço
@@ -931,7 +934,7 @@ export class BigBuckApp {
       // Inclui as texturas fotográficas (pacote de mídia do Shadertoy, CC BY-NC-SA)
       for (const t of ['textures/bark.jpg', 'textures/rock.jpg', 'textures/pebbles.png', 'textures/noise.png', 'textures/stars.jpg',
                        'textures/litter.jpg', 'textures/wetstones.jpg', 'textures/twigs.jpg', 'textures/bark2.jpg',
-                       'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg']) {
+                       'textures/granite.jpg', 'textures/graynoise.png', 'textures/wood.jpg', 'textures/sand.png']) {
         try { zipFiles[t] = new Uint8Array(await (await fetch(t)).arrayBuffer()); } catch (e) { /* servidor sem a pasta textures */ }
       }
       downloadModularZip(zipFiles);
@@ -1030,6 +1033,11 @@ export class BigBuckApp {
       document.getElementById('val-wind').textContent = `${Math.round((this.windStrength / 1.5) * 100)}%`;
     });
 
+    document.getElementById('slider-speed').addEventListener('input', (e) => {
+      this.camSpeed = parseFloat(e.target.value);
+      document.getElementById('val-speed').textContent = `${this.camSpeed.toFixed(2)}×`;
+    });
+
     document.querySelectorAll('.q-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.q-btn').forEach(b => {
@@ -1086,7 +1094,7 @@ export class BigBuckApp {
       return;
     }
 
-    const speed = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? 22.0 : 8.0;
+    const speed = ((this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) ? 22.0 : 8.0) * this.camSpeed;
     const forwardX = Math.sin(this.cam.yaw);
     const forwardZ = Math.cos(this.cam.yaw);
     const rightX = Math.cos(this.cam.yaw);

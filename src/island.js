@@ -81,19 +81,38 @@ export function mountSdf(x, z) {
   return best;
 }
 
-// Distância (m) ao eixo do rio mais próximo
-export function riverDist(x, z) {
+// Trecho do rio mais próximo em domínio deformado: direção do segmento
+// (dx, dz) e distância² a ele — base de riverDist e riverDir
+function riverNearest(x, z) {
   const qx = x + warpX(z), qz = z + warpZ(x);
-  let best = 1e18;
+  let bx = 0, bz = 0, best = 1e18;
   for (let i = 0; i < RIVER_SEGS.length; i++) {
     const s = RIVER_SEGS[i];
     const dx = s[2] - s[0], dz = s[3] - s[1];
     const t = Math.min(1, Math.max(0, ((qx - s[0]) * dx + (qz - s[1]) * dz) / (dx * dx + dz * dz)));
     const ex = qx - s[0] - dx * t, ez = qz - s[1] - dz * t;
     const d2 = ex * ex + ez * ez;
-    if (d2 < best) best = d2;
+    if (d2 < best) { best = d2; bx = dx; bz = dz; }
   }
-  return Math.sqrt(best);
+  return [bx, bz, best];
+}
+
+// Distância (m) ao eixo do rio mais próximo
+export function riverDist(x, z) {
+  return Math.sqrt(riverNearest(x, z)[2]);
+}
+
+// Sentido da correnteza (unitário, nascente→foz) no ponto — espelho JS do
+// islandRiver do WGSL: a direção do trecho retorna do domínio deformado
+// pela inversa de 1ª ordem do jacobiano dos meandros
+export function riverDir(x, z) {
+  const [bx, bz] = riverNearest(x, z);
+  const wxDz = Math.cos(z * 0.042 + 0.4) * 0.336 - Math.sin(z * 0.09) * 0.225;
+  const wzDx = Math.cos(x * 0.038 + 1.7) * 0.304 - Math.sin(x * 0.083) * 0.2075;
+  let dx = bx - wxDz * bz, dz = bz - wzDx * bx;
+  if (dx * x + dz * z < 0) { dx = -dx; dz = -dz; }
+  const l = Math.hypot(dx, dz) || 1;
+  return [dx / l, dz / l];
 }
 
 // Ponto do eixo de um rio: u em [0,1) escolhe o trecho e a posição nele

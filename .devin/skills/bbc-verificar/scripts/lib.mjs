@@ -230,7 +230,7 @@ export async function openApp({ width = 1280, height = 720, quality = null } = {
   await page.send('Page.navigate', { url: URL_APP });
 
   const close = async () => { await page.close(); await server.close(); };
-  const booted = await page.waitFor(`!!window.bigBuck && document.getElementById('api-pill').textContent.trim() !== ''`, 30000);
+  const booted = await page.waitFor(`!!window.bigBuck && /WebGPU/.test(document.getElementById('api-pill').textContent)`, 30000);
   const pill = booted ? await page.evaluate(`document.getElementById('api-pill').textContent.trim()`) : '(app não iniciou)';
   let ready = false;
   if (booted && pill === 'WebGPU HDR') {

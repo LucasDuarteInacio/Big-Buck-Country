@@ -336,12 +336,14 @@ export class ForestWorld {
           // nas concavidades, prado nos topos planos e neve por alt+declive
           if (mountBlend > 0.0) {
             const rN = this.noise.fbm(x * 0.035 + 2.9, z * 0.035 - 1.3, 4);
-            // Variação macro vertical: estirada em y → bandas suaves de rocha
-            const strata = this.noise.fbm(x * 0.004 + 9.0, y * 0.22, 3);
+            // Mix de dois tons de rocha por ruído esticado em y, como no
+            // fdlyW4: texture(iChannel0, vec2(pos.x, pos.y*48.0)*k) — grão
+            // sutil entre tons quase iguais, não faixas
+            const strata = this.noise.noise2D(x * 0.021 + z * 0.013 + 9.0, y * 1.3);
             const rockLum = (rN * 0.25 + 0.75) * 0.9;
-            let mr = rockLum * (0.24 + 0.10 * strata);
-            let mg = rockLum * (0.13 + 0.13 * strata);
-            let mb = rockLum * (0.07 + 0.15 * strata);
+            let mr = rockLum * (0.08 + 0.02 * strata);
+            let mg = rockLum * (0.05 + 0.04 * strata);
+            let mb = rockLum * (0.03 + 0.05 * strata);
 
             // Scree ocre acumulado nas vertentes mais suaves (nor.y ~0.7-0.9)
             const scree = Math.min(1, Math.max(0, (ny - 0.70) / 0.20));
@@ -364,13 +366,13 @@ export class ForestWorld {
             );
             mr *= macro; mg *= macro; mb *= macro;
 
-            // Neve: linha de neve ruidosa (~106-128m: só os cumes do maciço) +
-            // exigência de encosta suave + quebra direcional — neve se
-            // acumula, não cobre penhasco
+            // Neve como no fdlyW4: h = smoothstep(55, 80, y + 25·fbm) — a linha
+            // de neve cobre o terço superior do maciço (picos ~141m); e =
+            // smoothstep(1-0.5h, 1-0.1h, nor.y): em altitude alta pega até
+            // encostas íngremes — neve se acumula, não cobre penhasco
             const snowN = this.noise.fbm(x * 0.014 + 1.7, z * 0.014 - 6.2, 4);
-            const hSnow = Math.min(1, Math.max(0, (y + 22.0 * snowN - 128.0) / 30.0));
-            // Em altitude alta a neve pega até encostas íngremes (eT0 cai a 0.37)
-            const eT0 = 0.92 - 0.55 * hSnow, eT1 = 0.97 - 0.15 * hSnow;
+            const hSnow = Math.min(1, Math.max(0, (y + 22.0 * snowN - 55.0) / 25.0));
+            const eT0 = 1.0 - 0.5 * hSnow, eT1 = 1.0 - 0.1 * hSnow;
             const eSnow = Math.min(1, Math.max(0, (ny - eT0) / Math.max(eT1 - eT0, 1e-4)));
             const oSnow = 0.3 + 0.7 * Math.min(1, Math.max(0, (nx + hSnow * hSnow) / 0.1));
             const sSnow = hSnow * eSnow * oSnow;
@@ -385,13 +387,15 @@ export class ForestWorld {
           }
         }
 
-        // Praia: a restinga baixa vira areia clara dourada perto da linha
-        // d'água, clareando até sob a lâmina (areia molhada do baixio)
+        // Praia (dois tons, Castaway wt3XDj): areia dourada mais escura
+        // junto ao mar clareando para areia branca seca no topo da
+        // restinga; sob a lâmina fica a areia do baixio
         const sandWin = Math.min(1, Math.max(0, 1.4 * (1.0 - Math.abs(y + 0.8) / 4.2)));
         const beachAmt = coastM * sandWin * 0.92;
-        r = r * (1 - beachAmt) + 0.46 * beachAmt;
-        g = g * (1 - beachAmt) + 0.38 * beachAmt;
-        b = b * (1 - beachAmt) + 0.20 * beachAmt;
+        const sandT = smooth01((y + 2.6) / 3.4);
+        r = r * (1 - beachAmt) + (0.42 + 0.16 * sandT) * beachAmt;
+        g = g * (1 - beachAmt) + (0.34 + 0.15 * sandT) * beachAmt;
+        b = b * (1 - beachAmt) + (0.18 + 0.13 * sandT) * beachAmt;
 
         // Variação micro de luminosidade do solo
         const micro = 0.88 + this.noise.noise2D(x * 0.9 + 3.1, z * 0.9 - 1.7) * 0.24;
@@ -1257,7 +1261,8 @@ export class ForestWorld {
       const mask = this.mountMask(x, z);
       const scale = rng.range(0.55, 2.3) * (1.0 + mask * 1.4);
       const fr = 1.05 * scale; // raio útil da projeção (~0.8 do raio do mesh)
-      let minH = this.getMeshHeight(x, z, res, meshCache), maxH = minH;
+      const hC = this.getMeshHeight(x, z, res, meshCache);
+      let minH = hC, maxH = hC;
       for (let s = 0; s < 16; s++) {
         const rr = s < 12 ? fr : fr * 0.5;
         const a = (s % 12) * (Math.PI / 6) + (s >= 12 ? Math.PI / 12 : 0);
@@ -1272,8 +1277,9 @@ export class ForestWorld {
       // Rocha dentro do canal leva tint negativo: o sinal vira flag no
       // shader (hueJit < 0) e rende cinza úmido, sem musgo
       const inRiver = this.riverMask(x, z) > 0.5;
-      rocks.push(cellOf(x, minH, z), x, minH + 0.30 * scale, z,
-        scale, rng.range(0, Math.PI * 2), 0, rng.range(0.85, 1.15) * (inRiver ? -1 : 1), 0.0);
+      const rRot = rng.range(0, Math.PI * 2);
+      const rTint = rng.range(0.85, 1.15) * (inRiver ? -1 : 1);
+      rocks.push(cellOf(x, minH, z), x, minH + 0.30 * scale, z, scale, rRot, 0, rTint, 0.0);
     }
 
     // 5. Troncos Caídos + Aglomerados de Cogumelos Bioluminescentes (só na mata)
@@ -1426,7 +1432,8 @@ export class ForestWorld {
       canopiesA: [canopiesA, 'canopyACount'], canopiesB: [canopiesB, 'canopyBCount'],
       canopiesAFar: [canopiesAFar, 'canopyAFarCount'], canopiesBFar: [canopiesBFar, 'canopyBFarCount'],
       ferns: [ferns, 'fernCount'], grasses: [grasses, 'grassCount'],
-      rocks: [rocks, 'rockCount'], logs: [logs, 'logCount'], mushrooms: [mushrooms, 'mushroomCount'],
+      rocks: [rocks, 'rockCount'],
+      logs: [logs, 'logCount'], mushrooms: [mushrooms, 'mushroomCount'],
       trunksC: [trunksC, 'trunkCCount'], canopiesC: [canopiesC, 'canopyCCount'], canopiesCFar: [canopiesCFar, 'canopyCFarCount']
     };
     for (const name in lists) {
