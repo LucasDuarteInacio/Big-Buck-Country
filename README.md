@@ -1,4 +1,4 @@
-# Sylvan Canopy — Motor de Floresta Procedural em WebGPU
+# Big Buck Country — Motor de Floresta Procedural em WebGPU
 
 Motor de floresta procedural ultra-realista renderizado em **WebGPU**, escrito em **JavaScript puro (ES Modules)** — sem build step, sem `package.json`, sem dependências de npm. O único recurso externo é o Tailwind via CDN para o HUD.
 
@@ -14,7 +14,7 @@ Arquitetura modular inspirada em *Abyssal Garden*.
 | | |
 |---|---|
 | ![Picos nevados do maciço montanhoso](screenshots/montanha.jpg) | ![Sotobosque com samambaias, troncos e cogumelos](screenshots/sotobosque.jpg) |
-| **Maciço** — cristas ridged FBM, estratos e neve | **Sotobosque** — samambaias, troncos caídos e riacho |
+| **Maciço** — cristas erodidas (fbm derivada, estilo iq), scree e neve | **Sotobosque** — samambaias, troncos caídos e rio |
 
 | | |
 |---|---|
@@ -25,22 +25,22 @@ Arquitetura modular inspirada em *Abyssal Garden*.
 
 ## Características
 
-- **Mapa unificado**: vale florestal com riacho sinuoso no centro, rodeado por maciço montanhoso (inspirado no "Canyon" do iq) com transição contínua e linha das árvores por altitude
+- **Mapa unificado**: vale florestal com rio sinuoso de água corrente no centro, rodeado por maciço montanhoso (inspirado no "Canyon" do iq) com transição contínua e linha das árvores por altitude
 - **Dois biomas em um mundo**: floresta (copas multicamadas, bioluminescência) e montanha (estratos rochosos, picos nevados, prado alpino)
 - **Tudo procedural e determinístico**: terreno, árvores, rochas, samambaias, grama, troncos, cogumelos e esporos — mesma seed, mesmo mundo (`PRNG` + FBM/ridge noise)
 - **Instâncias com apoio físico**: rochas amostram a malha renderizada e assentam sobre o ponto mais baixo da sua projeção; troncos repousam sobre o contato mais alto — nada flutua
 - **Pipeline PBR**: Cook-Torrance GGX, shadow mapping com PCF 3×3, céu atmosférico com nuvens procedurais, sombras de nuvens, estrelas, God Rays e Bloom HDR
-- **Áudio procedural**: sintetizador Web Audio (vento, riacho, ambiente) — sem arquivos de som
+- **Áudio procedural**: sintetizador Web Audio (vento, rio, ambiente) — sem arquivos de som
 - **Exportador `.zip`**: baixa o projeto modular inteiro pelo botão no HUD
 
 ## Como Executar
 
-Não há build. Sirva a pasta estaticamente — **na porta 3000**:
+Não há build. Sirva a pasta estaticamente com `npx` — **na porta 3000**:
 
 ```bash
-cd sylvan-canopy-modular-webgpu
-python3 -m http.server 3000
-# ou: npx serve . -l 3000
+cd big-buck-country
+npx serve . -l 3000
+# ou: python3 -m http.server 3000
 ```
 
 Abra `http://localhost:3000`. Requer navegador com WebGPU: Chrome/Edge recentes ou Safari 18+. Sem WebGPU, o overlay de intro avisa (`Sem WebGPU`) — não há fallback WebGL.
@@ -69,7 +69,7 @@ Abra `http://localhost:3000`. Requer navegador com WebGPU: Chrome/Edge recentes 
 | Arquivo | Responsabilidade |
 |---|---|
 | `index.html` | HUD (Tailwind CDN), canvas e entry point ES Module; carrega os fontes para o exportador ZIP |
-| `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom) + `SylvanApp` (câmera, input, UI, loop) |
+| `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom) + `BigBuckApp` (câmera, input, UI, loop) |
 | `src/world.js` | `ForestWorld` — heightmap por bioma, construtores de mesh e `generateInstances` |
 | `src/shaders.js` | `WGSL_SHADERS` e `WGSL_POST_SHADERS` — pipeline principal e pós-processamento em WGSL |
 | `src/math.js` | `PRNG` determinístico, `ProceduralNoise` (value noise, FBM, ridge) e `Mat4` |

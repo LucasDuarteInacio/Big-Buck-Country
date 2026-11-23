@@ -118,6 +118,137 @@ export const WGSL_SHADERS = /* wgsl */`
     return v;
   }
 
+  // --- ÁGUA CORRENTE ("Where the River Goes" / P_Malin, adaptado) ---
+  fn hashF(p: f32) -> f32 {
+    var p2 = fract(vec2<f32>(p, p) * vec2<f32>(4.438975, 3.972973));
+    p2 += dot(p2.yx, p2.xy + 19.19);
+    return fract(p2.x * p2.y);
+  }
+
+  fn hash22(p: f32) -> vec2<f32> {
+    var p3 = fract(vec3<f32>(p, p, p) * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx + p3.yz) * p3.zy);
+  }
+
+  // Value noise 2D com derivadas analíticas: retorna (dx, dy, valor)
+  fn noiseDXY(o: vec2<f32>) -> vec3<f32> {
+    let p = floor(o);
+    let f = fract(o);
+    let n = p.x + p.y * 57.0;
+    let a = hashF(n);
+    let b = hashF(n + 1.0);
+    let c = hashF(n + 57.0);
+    let d = hashF(n + 58.0);
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let t = 3.0 * f2 - 2.0 * f3;
+    let dt = 6.0 * f - 6.0 * f2;
+    let res = a + (b - a) * t.x + (c - a) * t.y + (a - b + d - c) * t.x * t.y;
+    let dx = (b - a) * dt.x + (a - b + d - c) * dt.x * t.y;
+    let dy = (c - a) * dt.y + (a - b + d - c) * t.x * dt.y;
+    return vec3<f32>(dx, dy, res);
+  }
+
+  // FBM_DXY: a cada oitava o domínio avança no sentido do fluxo (com sinal
+  // alternado) e é deformado pelo próprio gradiente — são essas ondulações
+  // que "escalam" corrente abaixo que dão o aspecto de água viva
+  fn fbmDXY(p0: vec2<f32>, flow0: vec2<f32>, ps: f32, df: f32) -> vec3<f32> {
+    var f = vec3<f32>(0.0);
+    var tot = 0.0;
+    var a = 1.0;
+    var p = p0;
+    var flow = flow0;
+    for (var i = 0; i < 4; i++) {
+      p += flow;
+      flow *= -0.75;
+      let v = noiseDXY(p);
+      f += v * a;
+      p += v.xy * df;
+      p *= 2.0;
+      tot += a;
+      a *= ps;
+    }
+    return f / tot;
+  }
+
+  // Hash inteiro idêntico ao ProceduralNoise de math.js (mesma sequência
+  // de imul reproduzida em u32): a profundidade calculada aqui bate com o
+  // leito real de world.js para qualquer semente (viaja em cameraPos.w)
+  fn worldHash(ix: i32, iz: i32) -> f32 {
+    var n = u32(ix) * 374761393u + u32(iz) * 668265263u + u32(frame.cameraPos.w) * 1442695041u;
+    n = n ^ (n >> 13u);
+    n = n * 1274126177u;
+    n = n ^ (n >> 16u);
+    return f32(n) * (1.0 / 4294967296.0);
+  }
+
+  fn worldNoise2D(x: f32, z: f32) -> f32 {
+    let ix = i32(floor(x));
+    let iz = i32(floor(z));
+    let fx = x - f32(ix);
+    let fz = z - f32(iz);
+    let ux = fx * fx * (3.0 - 2.0 * fx);
+    let uz = fz * fz * (3.0 - 2.0 * fz);
+    let a = worldHash(ix, iz);
+    let b = worldHash(ix + 1, iz);
+    let c = worldHash(ix, iz + 1);
+    let d = worldHash(ix + 1, iz + 1);
+    return a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz;
+  }
+
+  // fbm(·,·,3) do ProceduralNoise: freq×2.03, amp×0.48, normalizado
+  fn worldFbm3(x: f32, z: f32) -> f32 {
+    var val = 0.0;
+    var amp = 0.5;
+    var freq = 1.0;
+    var norm = 0.0;
+    for (var i = 0; i < 3; i++) {
+      val += amp * worldNoise2D(x * freq, z * freq);
+      norm += amp;
+      freq *= 2.03;
+      amp *= 0.48;
+    }
+    return val / norm;
+  }
+
+  // Profundidade local d'água (>0 = submerso): dentro do canal é a mesma
+  // fórmula de world.js (bedY = -4.3 + fbm), na costa o fundo do mar é o
+  // mesmo seaBed do getTerrainHeight — a linha d'água e a espuma
+  // acompanham rio e praia de verdade
+  fn waterDepthAt(x: f32, z: f32) -> f32 {
+    let riverX = sin(z * 0.042 + 0.4) * 13.0 + cos(z * 0.09) * 3.5;
+    let chan = 1.0 - smoothstep(6.0, 15.0, abs(x - riverX)); // = riverMask
+    let bankH = -1.35 + (worldFbm3(x * 0.085 + 4.1, z * 0.085 - 2.8) - 0.5) * 1.8;
+    let bedY = -4.3 + worldFbm3(x * 0.22 + 5.5, z * 0.22 - 3.1);
+    var approxH = mix(bankH, bedY, chan);
+    // Mar ao redor da ilha: além da faixa costeira o fundo afunda
+    let seaM = smoothstep(92.0, 120.0, length(vec2<f32>(x, z + 6.0)));
+    let seaBed = -6.8 + worldFbm3(x * 0.15 - 2.0, z * 0.15 + 4.0) * 1.2;
+    approxH = mix(approxH, seaBed, seaM);
+    return -2.38 - approxH;
+  }
+
+  // Uma amostra da superfície: FBM_DXY advectado, filtragem pela derivada
+  // de tela (espelha à distância, sem cintilação) e normal achatado na espuma.
+  // fwidthUv chega pronto: dpdx/dpdy exigem fluxo uniforme e o branch de
+  // material não é — as derivadas são tomadas sobre worldPos no topo do fsMain
+  fn waterSurf(uv: vec2<f32>, flowOff: vec2<f32>, fMag: f32, foam: f32, fwidthUv: f32, freq: f32) -> vec4<f32> {
+    var fScale = 1.0 / (1.0 + fwidthUv * fwidthUv * 2000.0);
+    let dxy = fbmDXY(uv * freq, flowOff * freq, 0.75 + foam * 0.25, 0.25 - foam * 1.5);
+    fScale *= max(0.25, 1.0 - foam * 5.0);
+    let blended = mix(vec3<f32>(0.0, 1.0, 0.0), normalize(vec3<f32>(dxy.x, fMag, dxy.y)), fScale);
+    return vec4<f32>(normalize(blended), dxy.z * fScale);
+  }
+
+  // Filamentos de espuma: mesma família FBM_DXY em frequência maior,
+  // advectada mais devagar — laços que descem o rio com a corrente
+  fn waterFoamTex(uv: vec2<f32>, flowOff: vec2<f32>) -> f32 {
+    var f = fbmDXY(uv * 9.0, flowOff * 15.0, 0.8, -0.5).z;
+    f = max(0.0, (f - 0.2) / 0.2);
+    return pow(0.5, f);
+  }
+
   // --- CAMADA DE NUVENS PROCEDURAIS (plano a 55m, FBM rotacionado advectado pelo vento) ---
   fn cloudDensity(uv: vec2<f32>) -> f32 {
     var v = 0.0;
@@ -300,47 +431,6 @@ export const WGSL_SHADERS = /* wgsl */`
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
   }
 
-  // --- RAYMARCHING VOLUMÉTRICO DE RAIOS CREPUSCULARES (GOD RAYS) ---
-  fn computeVolumetricGodRays(worldPos: vec3<f32>) -> vec3<f32> {
-    let rayStart = frame.cameraPos.xyz;
-    let rayVec = worldPos - rayStart;
-    let totalDist = min(length(rayVec), 95.0);
-    let rayDir = rayVec / max(length(rayVec), 0.0001);
-    let L = normalize(frame.sunDir.xyz);
-
-    // Fase de Mie (forte espalhamento frontal quando olhando na direção do sol)
-    let cosTheta = dot(rayDir, L);
-    let g = 0.72;
-    let miePhase = (1.0 - g * g) / (4.0 * 3.14159 * pow(max(1.0 + g * g - 2.0 * g * cosTheta, 0.05), 1.5));
-
-    let steps = i32(frame.params2.x);
-    let stepSize = totalDist / f32(max(steps, 1));
-    // Dither espacial para eliminar banding
-    let dither = fract(sin(dot(worldPos.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-
-    var accumLight = 0.0;
-    for (var i = 0; i < steps; i++) {
-      let t = (f32(i) + dither) * stepSize;
-      let samplePos = rayStart + rayDir * t;
-
-      let lightClip = frame.lightViewProj * vec4<f32>(samplePos, 1.0);
-      let proj = lightClip.xyz / lightClip.w;
-      let suv = vec2<f32>(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-
-      var inSun = 1.0;
-      if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && proj.z > 0.0 && proj.z < 1.0) {
-        inSun = textureSampleCompareLevel(shadowMap, shadowSampler, suv, proj.z - 0.002);
-      }
-      // Densidade maior próxima ao solo úmido
-      let heightDensity = exp(-max(samplePos.y + 2.0, 0.0) * 0.08);
-      accumLight += inSun * heightDensity;
-    }
-
-    let transmittance = (accumLight / f32(max(steps, 1))) * totalDist * 0.018;
-    let rayStrength = transmittance * (0.35 + miePhase * 1.45) * frame.params.z * max(frame.params.w, 0.08);
-    return frame.sunColor.xyz * rayStrength;
-  }
-
   // --- MAIN FRAGMENT SHADER PBR ---
   @fragment
   fn fsMain(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -355,17 +445,34 @@ export const WGSL_SHADERS = /* wgsl */`
     var ao = 1.0;
     var emissive = vec3<f32>(0.0);
 
+    // Estado do rio (mat 6): preenchido no branch de material e consumido
+    // na composição de ambiente, quando a sombra PCF já existe
+    var wDepth = 0.0;
+    var wFoam = 0.0;
+    var wFoamBlend = 0.0;
+    var wH = 0.5;
+    var wSea = 0.0;
+
     let mat = i32(in.matId + 0.5);
     let distToCam = length(in.worldPos - frame.cameraPos.xyz);
     // Fade do detalhe fino com a distância: evita cintilação (shimmer)
     let detailFade = 1.0 / (1.0 + distToCam * 0.04);
+    // Derivadas de tela do worldPos em fluxo uniforme (área de pixel no
+    // domínio da água — o branch de material não pode chamar dpdx/dpdy)
+    let wpDx = dpdx(in.worldPos.xz);
+    let wpDy = dpdy(in.worldPos.xz);
+    let waterFwidth = max(max(abs(wpDx.x), abs(wpDx.y)), max(abs(wpDy.x), abs(wpDy.y)));
 
     // Recorte da silhueta da folha na copa, com borda erodida por ruído real
-    // (silhueta irregular orgânica em vez de curva matemática limpa)
-    let edgeN = textureSampleLevel(texNoise, texSamp, in.uv * 3.0 + vec2<f32>(in.hueJit * 37.0, in.hueJit * 11.0), 0.0).r;
-    if ((mat == 2 && leafSilhouette(in.uv) < (edgeN - 0.5) * 0.11) ||
-        (mat == 7 && leafSilhouetteRound(in.uv) < (edgeN - 0.5) * 0.11)) {
-      discard;
+    // (silhueta irregular orgânica em vez de curva matemática limpa).
+    // edgeN só é amostrado para materiais de folha — fora deles seria um
+    // fetch desperdiçado em todo fragmento de terreno/rocha/casca.
+    if (mat == 2 || mat == 7) {
+      let edgeN = textureSampleLevel(texNoise, texSamp, in.uv * 3.0 + vec2<f32>(in.hueJit * 37.0, in.hueJit * 11.0), 0.0).r;
+      if ((mat == 2 && leafSilhouette(in.uv) < (edgeN - 0.5) * 0.11) ||
+          (mat == 7 && leafSilhouetteRound(in.uv) < (edgeN - 0.5) * 0.11)) {
+        discard;
+      }
     }
 
     // Perturbação de Normal Procedural por Material (World-Space Bump)
@@ -422,7 +529,7 @@ export const WGSL_SHADERS = /* wgsl */`
         bump += (litLum * 0.30 + twgLum * 0.40) * valleyAmt;
       }
 
-      // Leito do riacho: seixos molhados fotográficos + superfície úmida
+      // Leito do rio: seixos molhados fotográficos + superfície úmida
       let wet = smoothstep(-0.9, -2.0, wp.y);
       if (wet > 0.0) {
         let ws = texLin(texWet, wp.xz * 0.30);
@@ -539,26 +646,107 @@ export const WGSL_SHADERS = /* wgsl */`
       emissive = vec3<f32>(0.22, 0.95, 0.72) * (1.8 * isNight * pulse) * smoothstep(0.35, 0.8, in.uv.y);
       roughness = 0.32;
     } else if (mat == 6) {
-      // Riacho com Ondulações Normais Animadas & Reflexo Fresnel
-      let t = frame.params.x * 1.4;
-      let w1 = sin(in.worldPos.x * 3.8 + t * 2.2 + cos(in.worldPos.z * 2.9 - t));
-      let w2 = cos(in.worldPos.z * 4.6 - t * 2.8 + sin(in.worldPos.x * 3.1));
-      let w3 = noise3D(vec3<f32>(in.worldPos.x * 12.0, t * 0.7, in.worldPos.z * 12.0)) - 0.5;
-      N = normalize(vec3<f32>(w1 * 0.05 + w3 * 0.10, 1.0, w2 * 0.05 + w3 * 0.06));
-      roughness = 0.08;
-      albedo = vec3<f32>(0.02, 0.06, 0.05);
+      // Rio corrente — "Where the River Goes" (P_Malin) adaptado:
+      // 1) campo de fluxo = tangente do canal + repulsão do raso
+      // 2) normal = FBM com derivadas advectado em 2 fases defasadas
+      //    (cross-fade no meio do ciclo → corrente contínua, sem pulsação)
+      // 3) espuma por rasura/vazão; fundo refratado na etapa de ambiente.
+      // A curva x(z) = sin(z·0.042+0.4)·13 + cos(z·0.09)·3.5 é a do world.js.
+      let t = frame.params.x;
+      let wp = in.worldPos;
+      let dxdz = 0.546 * cos(wp.z * 0.042 + 0.4) - 0.315 * sin(wp.z * 0.09);
+      let flowDir = normalize(vec2<f32>(dxdz, 1.0)); // corrente corre no sentido +z
+
+      // Profundidade (exata no canal: mesmo hash/fbm do world.js) e seu
+      // gradiente — a corrente desvia dos baixios como no shader original
+      let depthRaw = waterDepthAt(wp.x, wp.z);
+      let depth = max(depthRaw, 0.0);
+      let gEps = 0.5;
+      let wGrad = vec2<f32>(
+        waterDepthAt(wp.x + gEps, wp.z) - depthRaw,
+        waterDepthAt(wp.x, wp.z + gEps) - depthRaw
+      ) / gEps;
+
+      // Campo de fluxo (GetFlowRate): base rio abaixo, acelera e desvia no
+      // raso, desacelera em poças profundas e a jusante dos baixios
+      var flow = flowDir;
+      flow += -wGrad * 1.6 / (1.0 + depth * 1.5);
+      flow *= 1.0 / (1.0 + depth * 0.4);
+      let gN = wGrad / max(length(wGrad), 0.001);
+      let behind = 0.5 - dot(gN, -flow / max(length(flow), 0.001)) * 0.5;
+      var slow = clamp(depth * 2.2, 0.0, 1.0);
+      slow = mix(slow * 0.9 + 0.1, 1.0, behind * 0.9);
+      flow *= 0.5 + slow * 0.5;
+      flow *= 0.15 + 0.85 * smoothstep(0.0, 0.5, depth); // poças fora do canal: quase paradas
+
+      // Alto-mar em volta da ilha: a ondulação empurra para a costa com
+      // deriva lateral — não segue mais a tangente do rio
+      let seaM = smoothstep(88.0, 120.0, length(vec2<f32>(wp.x, wp.z + 6.0)));
+      wSea = seaM;
+      let toShore = normalize(vec2<f32>(0.0, -6.0) - wp.xz + vec2<f32>(0.001));
+      let seaFlow = toShore * 0.75 + vec2<f32>(-toShore.y, toShore.x) * 0.30;
+      flow = mix(flow, seaFlow, seaM);
+      let flowSpeed = length(flow);
+
+      // Espuma de rasura e vazão (mesma forma funcional do original):
+      // corredeiras rasas embranquecem, poças profundas ficam escuras
+      var foamAcc = flowSpeed * 0.5;
+      foamAcc += clamp(foamAcc - 0.4, 0.0, 1.0);
+      var foam = 1.0 - pow(clamp(depth * 0.6, 0.0, 1.0), max(foamAcc * 0.35, 0.001));
+      foam = clamp((foam - 0.20) * 1.5, 0.0, 1.0);
+      foam = foam * foam * 0.5;
+      foam *= smoothstep(0.02, 0.30, depth);
+      foam += smoothstep(0.85, 1.30, flowSpeed) * 0.20; // cristas nos trechos rápidos
+      wFoam = clamp(foam, 0.0, 1.0);
+
+      // Duas fases defasadas de meio ciclo com domínios ressaltados:
+      // a água nasce rio acima, corre e dissolve — advecção contínua
+      let wTime = t * 0.85;
+      let t0 = fract(wTime);
+      let t1 = fract(wTime + 0.5);
+      let uv0 = wp.xz + hash22(floor(wTime)) * 13.0;
+      let uv1 = wp.xz + hash22(floor(wTime + 0.5)) * 13.0;
+      // No mar a ondulação é mais baixa em frequência e mais inclinada (swell)
+      let wFreq = mix(4.0, 2.0, seaM);
+      let fMag = 2.5 / (1.0 + flowSpeed * flowSpeed * 5.0) * mix(1.0, 0.42, seaM);
+      let s0 = waterSurf(uv0, flow * (t0 - 0.5), fMag, wFoam, waterFwidth, wFreq);
+      let s1 = waterSurf(uv1, flow * (t1 - 0.5), fMag, wFoam, waterFwidth, wFreq);
+      let phase = abs(t0 - 0.5) * 2.0;
+      N = normalize(mix(s0.xyz, s1.xyz, phase));
+      wH = mix(s0.w, s1.w, phase);
+      wFoam = clamp(wFoam + smoothstep(0.62, 0.95, wH) * 0.5 * seaM, 0.0, 1.0); // whitecaps
+      let wFoamTex = mix(
+        waterFoamTex(uv0, flow * (t0 - 0.5) * 0.25),
+        waterFoamTex(uv1, flow * (t1 - 0.5) * 0.25),
+        phase
+      );
+      wFoamBlend = clamp(1.0 - pow(wFoamTex, wFoam * 5.0 + 0.001), 0.0, 1.0);
+      wDepth = depth;
+
+      // Linha d'água viva: a crista da onda decide se o pixel é água —
+      // a margem "lambe" a beira em vez de ser uma reta estática
+      if (depth + (wH - 0.5) * 0.10 < -0.015) { discard; }
+
+      albedo = vec3<f32>(0.0); // difuso vem da refração/espuma na etapa de ambiente
+      roughness = mix(0.05, 0.5, wFoamBlend);
+      ao = 1.0;
     }
 
     N = normalize(N + (dpdx(bump) + dpdy(bump)) * bumpScale * detailFade);
 
-    // Sombra Real Direcional PCF 3x3
-    var shadow = sampleShadowPCF(in.worldPos, N, L);
-
-    // Sombras projetadas das nuvens: interseção do raio sol->fragmento com o plano a 55m
-    if (L.y > 0.06) {
-      let cloudHit = in.worldPos + L * ((55.0 - in.worldPos.y) / L.y);
-      let cShadow = 1.0 - cloudCoverage(cloudUV(cloudHit)) * 0.62 * clamp(frame.params.w * 2.0, 0.0, 1.0);
-      shadow *= cShadow;
+    // Sombra Real Direcional PCF 3x3 — pulada em pixels de costas para o
+    // sol de materiais opacos: lá a sombra só multiplicaria termos já
+    // zerados por NdotL (folha/água seguem: translucidez e reflexo a usam)
+    var shadow = 1.0;
+    if (dot(N, L) > 0.0 || mat == 2 || mat == 3 || mat == 6 || mat == 7) {
+      shadow = sampleShadowPCF(in.worldPos, N, L);
+      // Sombras projetadas das nuvens: interseção do raio sol->fragmento com o plano a 55m
+      // (params.w ~0 à noite anularia o fator — poupa o ruído das nuvens)
+      if (L.y > 0.06 && frame.params.w > 0.02) {
+        let cloudHit = in.worldPos + L * ((55.0 - in.worldPos.y) / L.y);
+        let cShadow = 1.0 - cloudCoverage(cloudUV(cloudHit)) * 0.62 * clamp(frame.params.w * 2.0, 0.0, 1.0);
+        shadow *= cShadow;
+      }
     }
 
     // Cálculo Cook-Torrance GGX
@@ -596,9 +784,58 @@ export const WGSL_SHADERS = /* wgsl */`
     var ambient = skyAmbient * albedo * ao;
 
     if (mat == 6) {
-      let fresnelWater = fresnelSchlick(NdotV, vec3<f32>(0.02));
-      let skyRefl = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.45) * (0.35 + 0.65 * shadow);
-      ambient += skyRefl * fresnelWater * 1.8;
+      // --- Água corrente: refração analítica + reflexo de céu/nuvens ---
+      // Lâmina local ondulada pela crista (linha d'água e espuma respiram)
+      let depthW = max(wDepth + (wH - 0.5) * 0.10, 0.0);
+      let refrDir = refract(-V, N, 1.0 / 1.3333);
+      let pathT = depthW / max(-refrDir.y, 0.30);
+      let bedPos = in.worldPos + refrDir * pathT;
+
+      // Fundo de seixos molhados (mesma família da zona úmida do terreno)
+      var bedAlb = texLin(texWet, bedPos.xz * 0.30) * 1.05;
+      bedAlb *= 0.70 + 0.60 * noise3D(bedPos * 14.0);
+      // Sol difuso no fundo sob a mesma sombra PCF + cintilação das cristas
+      let caust = 0.80 + 0.45 * wH;
+      let bedLight = (frame.sunColor.xyz * 2.2 * max(L.y, 0.0) * shadow + skyAmbient * 1.5) * caust;
+      // Extinção espectral do corpo d'água (paleta do original: o azul
+      // extingue antes → cor de chá que deixa o leito de seixos aparecer)
+      var transmit = bedAlb * bedLight * exp2(-pathT * vec3<f32>(0.50, 0.60, 0.90) * 0.55);
+      // In-scattering: rio tem sedimento esverdeado; no mar a cor profunda
+      // de alto-mar predomina
+      let fwd = pow(clamp(dot(-V, L), 0.0, 1.0), 2.0);
+      let sedCol = mix(vec3<f32>(0.14, 0.20, 0.14), vec3<f32>(0.05, 0.15, 0.21), wSea);
+      transmit += sedCol
+                * (frame.sunColor.xyz * 1.6 * max(L.y, 0.0) * shadow + skyAmbient * 1.2)
+                * (1.0 - exp(-pathT * 0.8)) * (0.35 + 0.65 * fwd);
+
+      // Reflexo do céu + nuvens procedurais projetadas no plano a 55m
+      let R = reflect(-V, N);
+      var skyRefl = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, pow(max(R.y, 0.0), 0.55));
+      if (R.y > 0.02 && frame.params.w > 0.02) {
+        let cHit = in.worldPos + R * ((55.0 - in.worldPos.y) / R.y);
+        let dayAmtW = clamp(frame.params.w * 2.4 + 0.08, 0.0, 1.0);
+        let cloudCol = mix(frame.skyHorizonColor.xyz, frame.skyTopColor.xyz, 0.4) * 0.62
+                     + vec3<f32>(0.10) + frame.sunColor.xyz * 0.55 * dayAmtW;
+        skyRefl = mix(skyRefl, cloudCol, cloudCoverage(cloudUV(cHit)) * 0.8);
+      }
+      // Brilho azimutal do horizonte na direção do sol (como no fsSky)
+      let rAzim = normalize(vec3<f32>(R.x, 0.0, R.z) + vec3<f32>(0.001));
+      let lAzim = normalize(vec3<f32>(L.x, 0.0, L.z) + vec3<f32>(0.001));
+      skyRefl += frame.sunColor.xyz * pow(max(dot(rAzim, lAzim), 0.0), 2.5)
+               * exp(-max(R.y, 0.0) * 5.0) * 0.18 * clamp(frame.params.w * 2.0, 0.0, 1.0);
+
+      let fresW = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+      var waterCol = mix(transmit, skyRefl * (0.30 + 0.70 * shadow), fresW);
+
+      // Espuma: filamentos carregados rio abaixo + faixa viva na linha d'água
+      let edgeLine = smoothstep(0.0, 0.04, depthW) * (1.0 - smoothstep(0.06, 0.30, depthW));
+      let foamAmt = clamp(
+        wFoamBlend * (0.35 + 0.65 * clamp(depthW * 6.0, 0.0, 1.0)) + edgeLine * 0.6,
+        0.0, 1.0
+      );
+      let foamCol = (frame.sunColor.xyz * 1.35 * max(NdotL, 0.12) * shadow + skyAmbient * 0.8)
+                  * vec3<f32>(0.62, 0.66, 0.62);
+      ambient = mix(waterCol, foamCol, foamAmt);
     }
 
     var color = ambient + Lo + emissive;
@@ -611,9 +848,11 @@ export const WGSL_SHADERS = /* wgsl */`
     let sunInsc = pow(clamp(dot(-V, L), 0.0, 1.0), 6.0);
     let dayAmt2 = clamp(frame.params.w * 2.0, 0.0, 1.0);
     let fogTint = frame.fogColor.xyz + frame.sunColor.xyz * sunInsc * 0.45 * dayAmt2;
-    let godRays = computeVolumetricGodRays(in.worldPos);
 
-    color = color * ext + fogTint * (vec3<f32>(1.0) - ext) + godRays;
+    // Os god rays volumétricos rodam agora no passe de composição a partir
+    // da posição reconstruída do depth: idêntico por pixel, mas avaliado
+    // 1x em vez de 1x por fragmento sobreposto de terreno/folhagem.
+    color = color * ext + fogTint * (vec3<f32>(1.0) - ext);
 
     // Saída em Linear HDR (será processada pelo Bloom e ACES Tone Mapping)
     return vec4<f32>(max(color, vec3<f32>(0.0)), 1.0);
@@ -815,6 +1054,8 @@ export const WGSL_POST_SHADERS = /* wgsl */`
   @group(0) @binding(3) var linSampler: sampler;
   @group(0) @binding(4) var depthTex: texture_2d<f32>;
   @group(0) @binding(5) var<uniform> frame2: FrameView;
+  @group(0) @binding(6) var shadowMap: texture_depth_2d;
+  @group(0) @binding(7) var shadowSampler: sampler_comparison;
 
   // Reconstrói posição em mundo a partir de UV de tela + profundidade
   fn worldFromDepth(uv: vec2<f32>, d: f32) -> vec3<f32> {
@@ -825,6 +1066,51 @@ export const WGSL_POST_SHADERS = /* wgsl */`
 
   fn hash12(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+  }
+
+  // --- RAYMARCHING VOLUMÉTRICO DE RAIOS CREPUSCULARES (GOD RAYS) ---
+  // Mesmo cálculo que rodava no fsMain, agora 1x por pixel aqui no pós:
+  // o depth reconstrói o worldPos do fragmento vencedor do z-test, então
+  // o resultado é idêntico sem pagar o custo por cada camada de folhagem.
+  fn computeGodRays(worldPos: vec3<f32>) -> vec3<f32> {
+    if (frame2.params.z < 0.01) { return vec3<f32>(0.0); } // sem névoa, sem raio
+    let rayStart = frame2.cameraPos.xyz;
+    let rayVec = worldPos - rayStart;
+    let totalDist = min(length(rayVec), 95.0);
+    let rayDir = rayVec / max(length(rayVec), 0.0001);
+    let L = normalize(frame2.sunDir.xyz);
+
+    // Fase de Mie (forte espalhamento frontal quando olhando na direção do sol)
+    let cosTheta = dot(rayDir, L);
+    let g = 0.72;
+    let miePhase = (1.0 - g * g) / (4.0 * 3.14159 * pow(max(1.0 + g * g - 2.0 * g * cosTheta, 0.05), 1.5));
+
+    let steps = i32(frame2.params2.x);
+    let stepSize = totalDist / f32(max(steps, 1));
+    // Dither espacial para eliminar banding
+    let dither = fract(sin(dot(worldPos.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+
+    var accumLight = 0.0;
+    for (var i = 0; i < steps; i++) {
+      let t = (f32(i) + dither) * stepSize;
+      let samplePos = rayStart + rayDir * t;
+
+      let lightClip = frame2.lightViewProj * vec4<f32>(samplePos, 1.0);
+      let proj = lightClip.xyz / lightClip.w;
+      let suv = vec2<f32>(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+
+      var inSun = 1.0;
+      if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && proj.z > 0.0 && proj.z < 1.0) {
+        inSun = textureSampleCompareLevel(shadowMap, shadowSampler, suv, proj.z - 0.002);
+      }
+      // Densidade maior próxima ao solo úmido
+      let heightDensity = exp(-max(samplePos.y + 2.0, 0.0) * 0.08);
+      accumLight += inSun * heightDensity;
+    }
+
+    let transmittance = (accumLight / f32(max(steps, 1))) * totalDist * 0.018;
+    let rayStrength = transmittance * (0.35 + miePhase * 1.45) * frame2.params.z * max(frame2.params.w, 0.08);
+    return frame2.sunColor.xyz * rayStrength;
   }
 
   // SSAO em espaço de mundo: hemisfério orientado à normal reconstruída do depth
@@ -899,27 +1185,29 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     return out;
   }
 
-  // Extração de altas luzes HDR para Bloom
+  // Extração de altas luzes HDR para Bloom — e SSAO no canal alpha:
+  // este passe já roda em meia-resolução, então o AO sai a 1/4 do custo
+  // de tela cheia e ainda recebe o blur gaussiano do bloom de graça
   @fragment
   fn fsBloomExtract(in: FullscreenOut) -> @location(0) vec4<f32> {
     let col = textureSample(srcTex, linSampler, in.uv).rgb;
     let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
     let contrib = max(0.0, luma - post.threshold) / max(luma, 0.0001);
-    return vec4<f32>(col * contrib, 1.0);
+    return vec4<f32>(col * contrib, computeSSAO(in.uv));
   }
 
-  // Desfoque Gaussiano Separável (9-tap)
+  // Desfoque Gaussiano Separável (9-tap) — rgba: o alpha carrega o SSAO
   @fragment
   fn fsBlur(in: FullscreenOut) -> @location(0) vec4<f32> {
     let texel = post.direction / vec2<f32>(textureDimensions(srcTex));
     var weights = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
-    var result = textureSample(srcTex, linSampler, in.uv).rgb * weights[0];
+    var result = textureSample(srcTex, linSampler, in.uv) * weights[0];
     for (var i = 1; i < 5; i++) {
       let off = texel * f32(i) * 1.8;
-      result += textureSample(srcTex, linSampler, in.uv + off).rgb * weights[i];
-      result += textureSample(srcTex, linSampler, in.uv - off).rgb * weights[i];
+      result += textureSample(srcTex, linSampler, in.uv + off) * weights[i];
+      result += textureSample(srcTex, linSampler, in.uv - off) * weights[i];
     }
-    return vec4<f32>(result, 1.0);
+    return result;
   }
 
   // Composição Final: HDR + Bloom + Aberração Cromática Sutil + ACES Tone Mapping + Vinheta
@@ -934,11 +1222,20 @@ export const WGSL_POST_SHADERS = /* wgsl */`
     let b = textureSample(srcTex, linSampler, in.uv - caOffset).b;
     var hdrColor = vec3<f32>(r, g, b);
 
-    // Oclusão ambiental de tela: contato/crevises escurecem antes do bloom
-    hdrColor *= computeSSAO(in.uv);
+    // God rays 1x por pixel a partir da posição reconstruída do depth
+    // (só o céu fica com o depth limpo = 1.0 exato — e o fsSky nunca os teve)
+    let dDims = vec2<f32>(textureDimensions(depthTex));
+    let ipos = clamp(vec2<i32>(in.uv * dDims), vec2<i32>(0), vec2<i32>(dDims) - 1);
+    let d0 = textureLoad(depthTex, ipos, 0).x;
+    if (d0 < 1.0) {
+      hdrColor += computeGodRays(worldFromDepth(in.uv, d0));
+    }
 
-    let bloom = textureSample(bloomTex, linSampler, in.uv).rgb;
-    hdrColor += bloom * post.bloomIntensity;
+    // Bloom rgb + Oclusão ambiental de tela viajando no alpha (meia-res
+    // com blur grátis): contato/crevises escurecem antes do bloom
+    let bloom = textureSample(bloomTex, linSampler, in.uv);
+    hdrColor *= bloom.a;
+    hdrColor += bloom.rgb * post.bloomIntensity;
 
     // Vinheta óptica cinematográfica
     let vignette = 1.0 - distSq * 0.52;

@@ -236,7 +236,10 @@ class WebGPURenderer {
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        // Shadow map reutilizado pelo god-ray marcher do passe de composição
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } }
       ]
     });
     const postLayout = dev.createPipelineLayout({ bindGroupLayouts: [this.postBindGroupLayout] });
@@ -279,6 +282,9 @@ class WebGPURenderer {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
     });
     this.shadowView = this.shadowTexture.createView();
+    // O passe de composição também amostra o shadow map (god rays):
+    // os bind groups de pós precisam ser refeitos com a view nova
+    if (this.bloomViewA) this.createPostBindGroups();
     this.mainBindGroup = this.device.createBindGroup({
       layout: this.mainBindGroupLayout,
       entries: [
@@ -417,10 +423,15 @@ class WebGPURenderer {
     this.hdrView = this.hdrTexture.createView();
     this.bloomViewA = this.bloomTexA.createView();
     this.bloomViewB = this.bloomTexB.createView();
+    this.createPostBindGroups();
+  }
 
+  createPostBindGroups() {
     const postExtras = [
       { binding: 4, resource: this.depthView },
-      { binding: 5, resource: { buffer: this.uniformBuffer } }
+      { binding: 5, resource: { buffer: this.uniformBuffer } },
+      { binding: 6, resource: this.shadowView },
+      { binding: 7, resource: this.shadowSampler }
     ];
     this.bgExtract = this.device.createBindGroup({
       layout: this.postBindGroupLayout,
@@ -519,10 +530,6 @@ class WebGPURenderer {
     });
     hdrPass.setBindGroup(0, this.mainBindGroup);
 
-    // Céu
-    hdrPass.setPipeline(this.skyPipeline);
-    hdrPass.draw(3, 1, 0, 0);
-
     // Terreno & Riacho
     hdrPass.setPipeline(this.terrainPipeline);
     hdrPass.setVertexBuffer(0, sb.terrainVB);
@@ -554,6 +561,12 @@ class WebGPURenderer {
     drawMainInst(sb.canopyBVB, sb.canopyBIB, sb.canopyBIdxCount, sb.canopyBInstB, sb.canopyBInstCount);
     drawMainInst(sb.fernVB, sb.fernIB, sb.fernIdxCount, sb.fernInstB, sb.fernInstCount);
     drawMainInst(sb.grassVB, sb.grassIB, sb.grassIdxCount, sb.grassInstB, sb.grassInstCount);
+
+    // Céu por último entre os opacos: o depth test descarta os pixels já
+    // cobertos por terreno/folhagem — o fsSky (raymarch de nuvens) é o
+    // fragment shader mais caro do frame e antes rodava na tela inteira
+    hdrPass.setPipeline(this.skyPipeline);
+    hdrPass.draw(3, 1, 0, 0);
 
     // Esporos & Vagalumes
     if (sb.sporeCount > 0) {
@@ -681,12 +694,12 @@ function downloadModularZip(modulesMap) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'sylvan-canopy-modular-webgpu.zip';
+  a.download = 'big-buck-country-webgpu.zip';
   a.click();
   URL.revokeObjectURL(url);
 }
 
-export class SylvanApp {
+export class BigBuckApp {
   constructor(rawModulesSource) {
     this.rawModulesSource = rawModulesSource;
     this.canvas = document.getElementById('viewport');
@@ -700,10 +713,10 @@ export class SylvanApp {
     this.windStrength = 0.65;
     this.autoTour = false;
 
-    // Câmera inicia na clareira olhando para o riacho e raios de sol
+    // Câmera inicia na margem da clareira olhando rio acima e os raios de sol
     this.cam = {
-      pos: [4.5, 2.2, 14.0],
-      yaw: Math.PI + 0.12,
+      pos: [0.0, 2.2, 18.0],
+      yaw: Math.PI - 0.55,
       pitch: 0.06,
       vel: [0, 0, 0],
       flyOffset: 0
@@ -725,6 +738,11 @@ export class SylvanApp {
     this.lastFrameTime = performance.now();
     this.fpsFrames = 0;
     this.fpsTimer = 0;
+
+    // Governador de FPS: escala a resolução interna sob carga para
+    // sustentar >=30 FPS e devolve a resolução total quando a GPU folga
+    this.renderScale = 1.0;
+    this.upscaleStreak = 0;
   }
 
   async bootstrap() {
@@ -752,7 +770,7 @@ export class SylvanApp {
     const preset = QUALITY_PRESETS[this.qualityKey];
     const meshes = {
       terrain: this.world.buildTerrainMesh(preset.terrainRes),
-      water: this.world.buildWaterMesh(96),
+      water: this.world.buildWaterMesh(24),
       trunkA: this.world.buildTreeTrunkMesh(0),
       trunkB: this.world.buildTreeTrunkMesh(1),
       canopyA: this.world.buildCanopyClusterMesh(0),
@@ -771,11 +789,31 @@ export class SylvanApp {
 
   handleResize() {
     const preset = QUALITY_PRESETS[this.qualityKey];
-    const w = Math.floor(window.innerWidth * preset.dpr);
-    const h = Math.floor(window.innerHeight * preset.dpr);
+    const w = Math.floor(window.innerWidth * preset.dpr * this.renderScale);
+    const h = Math.floor(window.innerHeight * preset.dpr * this.renderScale);
     this.canvas.width = w;
     this.canvas.height = h;
     this.renderer.resize(w, h);
+  }
+
+  // Escala dinâmica de resolução: degrada e restaura suavemente mirando
+  // >=30 FPS sem trocar o preset de qualidade escolhido pelo usuário
+  autoScale(fps) {
+    const MIN_SCALE = 0.5;
+    if (fps < 29 && this.renderScale > MIN_SCALE) {
+      this.renderScale = Math.max(MIN_SCALE, this.renderScale * 0.85);
+      this.upscaleStreak = 0;
+      this.handleResize();
+    } else if (fps > 44 && this.renderScale < 1.0) {
+      // Só restaura após janelas consecutivas de folga — evita oscilação
+      if (++this.upscaleStreak >= 3) {
+        this.upscaleStreak = 0;
+        this.renderScale = Math.min(1.0, this.renderScale * 1.12);
+        this.handleResize();
+      }
+    } else {
+      this.upscaleStreak = 0;
+    }
   }
 
   bindUI() {
@@ -790,7 +828,7 @@ export class SylvanApp {
     // Download Projeto Modular (.zip)
     document.getElementById('btn-download-zip').addEventListener('click', async () => {
       const zipFiles = {
-        'README.md': `# Sylvan Canopy — Ultra-Realistic WebGPU Procedural Forest\n\nArquitetura modular inspirada em Abyssal Garden.\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/world.js\`: Gerador procedural de mapa unificado — vale florestal com riacho rodeado por maciço montanhoso (cristas ridged fbm, estratos, picos nevados)\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
+        'README.md': `# Big Buck Country — Ultra-Realistic WebGPU Procedural Forest\n\nArquitetura modular inspirada em Abyssal Garden.\n\n## Estrutura\n- \`index.html\`: Interface HUD e ponto de entrada ES Module\n- \`src/math.js\`: PRNG determinístico, ruído FBM/Ridge e Mat4\n- \`src/quality.js\`: Presets de qualidade gráfica e shadow maps\n- \`src/world.js\`: Gerador procedural de mapa unificado — vale florestal com rio corrente rodeado por maciço montanhoso (cristas erodidas por fbm com derivada (fdlyW4 do iq), scree ocre, picos nevados)\n- \`src/shaders.js\`: Shaders PBR Cook-Torrance GGX, Shadow Mapping PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens e estrelas, God Rays e Bloom HDR\n- \`src/audio.js\`: Sintetizador Web Audio procedural\n- \`src/main.js\`: Orquestrador de renderização WebGPU\n- \`textures/\`: Texturas do pacote de mídia do Shadertoy (CC BY-NC-SA 3.0)\n\n## Como Executar\nSirva a pasta com qualquer servidor HTTP local (ex: \`npx serve .\` ou \`python -m http.server\`).`,
         'index.html': this.rawModulesSource['index.html'],
         'src/math.js': this.rawModulesSource['math.js'],
         'src/quality.js': this.rawModulesSource['quality.js'],
@@ -945,7 +983,7 @@ export class SylvanApp {
   updateCamera(dt, elapsedSec) {
     if (this.autoTour) {
       const angle = elapsedSec * 0.075;
-      const radius = 24.0 + Math.sin(elapsedSec * 0.14) * 9.0;
+      const radius = 30.0 + Math.sin(elapsedSec * 0.14) * 12.0;
       this.cam.pos[0] = Math.cos(angle) * radius;
       this.cam.pos[2] = Math.sin(angle) * radius;
       const groundY = this.world.getTerrainHeight(this.cam.pos[0], this.cam.pos[2]);
@@ -977,7 +1015,8 @@ export class SylvanApp {
     this.cam.vel[0] += (moveX - this.cam.vel[0]) * damping;
     this.cam.vel[2] += (moveZ - this.cam.vel[2]) * damping;
 
-    const limit = this.world.worldSize * 0.43;
+    // Permite sair da ilha e flutuar sobre o mar um trecho além da costa
+    const limit = this.world.worldSize * 0.75;
     this.cam.pos[0] = Math.max(-limit, Math.min(limit, this.cam.pos[0] + this.cam.vel[0] * dt));
     this.cam.pos[2] = Math.max(-limit, Math.min(limit, this.cam.pos[2] + this.cam.vel[2] * dt));
 
@@ -1071,9 +1110,11 @@ export class SylvanApp {
     this.fpsTimer += dt;
     if (this.fpsTimer >= 0.5) {
       const fps = Math.round(this.fpsFrames / this.fpsTimer);
-      document.getElementById('fps-counter').textContent = `${fps} FPS`;
+      const pct = this.renderScale < 1.0 ? ` · ${Math.round(this.renderScale * 100)}%` : '';
+      document.getElementById('fps-counter').textContent = `${fps} FPS${pct}`;
       this.fpsFrames = 0;
       this.fpsTimer = 0;
+      this.autoScale(fps);
     }
 
     this.updateCamera(dt, elapsedSec);
@@ -1082,7 +1123,8 @@ export class SylvanApp {
     this.audio.update(this.windStrength, Math.abs(this.cam.pos[0] - streamX), elapsedSec);
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
-    Mat4.perspective(this.projMat, (60 * Math.PI) / 180, aspect, 0.2, 230.0);
+    Mat4.perspective(this.projMat, (60 * Math.PI) / 180, aspect, 0.2,
+      Math.max(this.world.worldSize * 1.7, this.world.oceanSize * 0.75));
 
     const lookDir = [
       Math.sin(this.cam.yaw) * Math.cos(this.cam.pitch),
@@ -1118,7 +1160,7 @@ export class SylvanApp {
     u.set(this.invVpMat, 16);
     u.set(this.lightVpMat, 32);
 
-    u[48] = this.cam.pos[0]; u[49] = this.cam.pos[1]; u[50] = this.cam.pos[2]; u[51] = 1.0;
+    u[48] = this.cam.pos[0]; u[49] = this.cam.pos[1]; u[50] = this.cam.pos[2]; u[51] = this.world.seed; // .w: seed p/ hash do leito no shader de água
     u[52] = atm.sunDir[0];   u[53] = atm.sunDir[1];   u[54] = atm.sunDir[2];   u[55] = 0.0;
     u[56] = atm.sunColor[0]; u[57] = atm.sunColor[1]; u[58] = atm.sunColor[2]; u[59] = 1.0;
     u[60] = atm.skyTop[0];   u[61] = atm.skyTop[1];   u[62] = atm.skyTop[2];   u[63] = 1.0;

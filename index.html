@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sylvan Canopy — WebGPU Modular</title>
+  <title>Big Buck Country — WebGPU Modular</title>
   <link rel="icon" href="data:," />
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
@@ -14,7 +14,7 @@
   <div id="intro-overlay" class="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-emerald-950/95 via-black/90 to-emerald-950/95 transition-opacity duration-700">
     <div class="text-center px-6 max-w-lg">
       <div class="text-emerald-300/60 text-xs tracking-[0.4em] uppercase mb-3">Procedural Forest Engine</div>
-      <h1 class="text-4xl md:text-5xl font-bold text-emerald-100 mb-4 tracking-tight">Sylvan Canopy</h1>
+      <h1 class="text-4xl md:text-5xl font-bold text-emerald-100 mb-4 tracking-tight">Big Buck Country</h1>
       <p id="backend-text-intro" class="text-emerald-200/60 text-sm mb-2">Inicializando motor…</p>
       <p class="text-emerald-200/40 text-xs mb-8">WASD / Setas para mover • Mouse para olhar • Shift para correr</p>
       <button id="btn-enter" class="px-8 py-3 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-100 font-medium hover:bg-emerald-500/35 hover:border-emerald-300/60 transition cursor-pointer">
@@ -35,7 +35,7 @@
 
   <!-- ===== Painel de Controles ===== -->
   <div id="controls-panel" class="fixed bottom-4 left-4 z-40 w-72 p-4 rounded-2xl bg-black/55 border border-emerald-400/15 backdrop-blur-xl text-white transition-all duration-500">
-    <div class="text-emerald-300/70 text-[10px] tracking-[0.3em] uppercase mb-3">Sylvan Canopy</div>
+    <div class="text-emerald-300/70 text-[10px] tracking-[0.3em] uppercase mb-3">Big Buck Country</div>
 
     <div class="flex justify-between text-xs text-emerald-100/80 mb-1">
       <span>Hora do Dia</span><span id="val-time" class="text-emerald-300/90 font-mono">—</span>
@@ -83,7 +83,7 @@
   </div>
 
   <script type="module">
-    import { SylvanApp } from './src/main.js';
+    import { BigBuckApp } from './src/main.js';
     window.addEventListener('DOMContentLoaded', async () => {
       // Carrega os fontes dos módulos para o exportador ZIP
       const files = ['index.html', 'src/math.js', 'src/quality.js', 'src/world.js', 'src/shaders.js', 'src/audio.js', 'src/main.js'];
@@ -92,9 +92,9 @@
         const name = f.startsWith('src/') ? f.slice(4) : f;
         raw[name] = await (await fetch(f)).text();
       }));
-      const app = new SylvanApp(raw);
+      const app = new BigBuckApp(raw);
       app.bootstrap();
-      window.sylvan = app; // hook de depuração/console
+      window.bigBuck = app; // hook de depuração/console
     });
   </script>
 </body>

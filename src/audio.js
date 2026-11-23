@@ -65,7 +65,7 @@ export class ForestAudio {
     this.windGain.connect(this.masterGain);
     windSrc.start();
 
-    // 2. Murmúrio suave do riacho
+    // 2. Murmúrio suave do rio
     const streamSrc = this.ctx.createBufferSource();
     streamSrc.buffer = noiseBuffer;
     streamSrc.loop = true;
@@ -97,7 +97,7 @@ export class ForestAudio {
     this.windFilter.frequency.setTargetAtTime(freq, this.ctx.currentTime, 0.2);
     this.windGain.gain.setTargetAtTime(vol, this.ctx.currentTime, 0.2);
 
-    // Volume do riacho aumenta quando o jogador se aproxima da água
+    // Volume do rio aumenta quando o jogador se aproxima da água
     const streamProximity = Math.exp(-Math.max(0, distToStream - 3.0) * 0.09);
     this.streamGain.gain.setTargetAtTime(0.02 + streamProximity * 0.18, this.ctx.currentTime, 0.25);
   }

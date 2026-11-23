@@ -43,6 +43,29 @@ export class ProceduralNoise {
     const d = this.hash2(ix + 1, iz + 1);
     return a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz;
   }
+  // Value noise com derivadas analíticas [v, dv/dx, dv/dz] — base do relevo
+  // erodido estilo iq ("Elevated"): amortecer cada oitava pelo gradiente
+  // acumulado gera cristas afiadas e cones de talude sem simulação
+  noised2(x, z) {
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
+    const fx = x - ix;
+    const fz = z - iz;
+    const ux = fx * fx * (3.0 - 2.0 * fx);
+    const uz = fz * fz * (3.0 - 2.0 * fz);
+    const dux = 6.0 * fx * (1.0 - fx);
+    const duz = 6.0 * fz * (1.0 - fz);
+    const a = this.hash2(ix, iz);
+    const b = this.hash2(ix + 1, iz);
+    const c = this.hash2(ix, iz + 1);
+    const d = this.hash2(ix + 1, iz + 1);
+    const k1 = b - a, k2 = c - a, k4 = a - b - c + d;
+    return [
+      a + k1 * ux + k2 * uz + k4 * ux * uz,
+      dux * (k1 + k4 * uz),
+      duz * (k2 + k4 * ux)
+    ];
+  }
   fbm(x, z, octaves = 5) {
     let val = 0.0;
     let amp = 0.5;

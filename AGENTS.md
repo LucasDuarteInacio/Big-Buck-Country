@@ -1,15 +1,15 @@
-# AGENTS.md — Sylvan Canopy
+# AGENTS.md — Big Buck Country
 
 Guia para agentes de IA trabalharem neste repositório.
 
 ## Visão Geral do Projeto
 
-**Sylvan Canopy** é um motor de floresta procedural ultra-realista renderizado em **WebGPU**, escrito em **JavaScript puro (ES Modules)**, sem build step, sem `package.json` e sem dependências de npm — o único recurso externo é o Tailwind via CDN em `index.html`. A arquitetura é modular, inspirada em "Abyssal Garden".
+**Big Buck Country** é um motor de floresta procedural ultra-realista renderizado em **WebGPU**, escrito em **JavaScript puro (ES Modules)**, sem build step, sem `package.json` e sem dependências de npm — o único recurso externo é o Tailwind via CDN em `index.html`. A arquitetura é modular, inspirada em "Abyssal Garden".
 
 O app renderiza dois biomas selecionáveis no HUD:
 
-- **Floresta**: duas espécies de árvores, copas multicamadas, riacho e bioluminescência.
-- **Montanha**: cristas com ridged FBM, estratos rochosos, picos nevados e prado alpino (inspirado no "Canyon" do iq).
+- **Floresta**: duas espécies de árvores, copas multicamadas, rio corrente que deságua no mar e bioluminescência. O mapa é uma ilha: além da faixa costeira (~92–120m do foco 0,-6) o terreno mergulha sob o oceano (`seaBed`/`seaMask`/`mouth` em `getTerrainHeight`), e o rio corta um fiorde pela crista costeira até a água salgada.
+- **Montanha**: cristas com FBM amortecido por derivada (`noised2`/`mountainIq`, portado do shader fdlyW4 do iq), scree ocre, picos nevados por altitude+declividade e prado alpino.
 
 Pipeline de renderização: PBR Cook-Torrance GGX, shadow mapping com PCF 3x3, céu atmosférico com nuvens procedurais, sombras de nuvens, estrelas, God Rays e Bloom HDR — tudo em WGSL.
 
@@ -17,8 +17,8 @@ Pipeline de renderização: PBR Cook-Torrance GGX, shadow mapping com PCF 3x3, c
 
 | Arquivo | Responsabilidade |
 |---|---|
-| `index.html` | HUD (Tailwind CDN), canvas e entry point `<script type="module">` que importa `SylvanApp` e carrega os fontes para o exportador ZIP |
-| `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom post) + `SylvanApp` (orquestração, câmera, input, UI, loop). Também contém `downloadModularZip`, o exportador `.zip` do projeto |
+| `index.html` | HUD (Tailwind CDN), canvas e entry point `<script type="module">` que importa `BigBuckApp` e carrega os fontes para o exportador ZIP |
+| `src/main.js` | `WebGPURenderer` (device, pipelines, shadow pass, HDR/bloom post) + `BigBuckApp` (orquestração, câmera, input, UI, loop). Também contém `downloadModularZip`, o exportador `.zip` do projeto |
 | `src/world.js` | `ForestWorld` — geração procedural: heightmap por bioma, construtores de mesh (`buildTerrainMesh`, `buildTreeTrunkMesh`, `buildCanopyClusterMesh`, `buildFernMesh`, `buildGrassMesh`, `buildRockMesh`, `buildFallenLogMesh`, `buildMushroomMesh`, `buildWaterMesh`) e `generateInstances(preset)` |
 | `src/shaders.js` | `WGSL_SHADERS` (pipeline principal) e `WGSL_POST_SHADERS` (pós-processamento) como template literals WGSL |
 | `src/math.js` | `PRNG` (determinístico), `ProceduralNoise` (value noise, FBM, ridge) e `Mat4` |
@@ -31,7 +31,7 @@ Pipeline de renderização: PBR Cook-Torrance GGX, shadow mapping com PCF 3x3, c
 Não há build. Sirva a pasta estaticamente — **sempre na porta 3000**:
 
 ```bash
-cd /Users/lucasduarte/Downloads/sylvan-canopy-modular-webgpu
+cd /Users/lucasduarte/Downloads/big-buck-country
 python3 -m http.server 3000
 # ou: npx serve . -l 3000
 ```
@@ -54,6 +54,12 @@ Abra `http://localhost:3000`. Requer navegador com WebGPU: Chrome/Edge recentes 
 
 - Shaders ficam dentro dos template literals `WGSL_SHADERS` / `WGSL_POST_SHADERS`. Validar sintaxe WGSL ao editar — erro de shader só aparece em runtime no console do navegador.
 - Ao alterar bindings/uniforms, manter o bind group layout em `createPipelines()` (`main.js`) e o tamanho/offset do `uniformData` (Float32Array de 80 elementos = 320 bytes) sincronizados com a `struct` WGSL.
+- Pipeline de pós-processamento: **god rays e SSAO rodam no post, não no `fsMain`**. Os god rays marcham sobre o shadow map (bindings 6/7 do `postBindGroupLayout`) a partir do `worldPos` reconstruído do depth — 1x por pixel. O SSAO é calculado em meia-resolução dentro de `fsBloomExtract` e viaja no **canal alpha do bloom** (o blur separável o suaviza de graça); `fsComposite` lê `bloom.a`. Trocar a resolução do shadow map recria os bind groups de pós via `createPostBindGroups()`.
+
+### Performance
+
+- O céu é desenhado **depois** dos opacos (o depth test elimina pixels cobertos — `fsSky` é o fragment mais caro do frame).
+- `BigBuckApp.autoScale` é o governador de FPS: escala `renderScale` (multiplicador do `dpr` do preset) para sustentar >=30 FPS e restaura 1.0 quando a GPU folga. Não é parâmetro de preset — é dinâmico em runtime.
 
 ### Exportador ZIP
 
@@ -69,7 +75,7 @@ Ao terminar **qualquer** tarefa que altere código:
 
 1. Subir o servidor na porta 3000 em background:
    ```bash
-   cd /Users/lucasduarte/Downloads/sylvan-canopy-modular-webgpu
+   cd /Users/lucasduarte/Downloads/big-buck-country
    python3 -m http.server 3000
    ```
 2. Abrir `http://localhost:3000` (browser preview se disponível) e verificar:

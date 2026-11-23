@@ -9,10 +9,13 @@ export class ForestWorld {
   constructor(seed = 2026) {
     this.seed = seed;
     this.noise = new ProceduralNoise(seed);
-    this.worldSize = 190.0;
+    this.worldSize = 280.0;
+    this.waterLevel = -2.38;
+    this.oceanSize = 1600.0; // o plano de água vai além do terreno, até o horizonte
   }
 
-  // Perfil contínuo do riacho sinuoso que corta a clareira
+  // Perfil contínuo do rio sinuoso que corta o vale — dx/dz = 0.546·cos(z·0.042+0.4) − 0.315·sin(z·0.09)
+  // (a tangente do canal também é usada pelo shader de água para a correnteza)
   getStreamOffset(z) {
     return Math.sin(z * 0.042 + 0.4) * 13.0 + Math.cos(z * 0.09) * 3.5;
   }
@@ -20,10 +23,41 @@ export class ForestWorld {
   // Fator de transição vale florestal (0) -> maciço montanhoso (1)
   mountMask(x, z) {
     const dist = Math.hypot(x, z + 6.0);
-    return Math.min(1, Math.max(0, (dist - 34.0) / 44.0));
+    const inner = this.worldSize * 0.16; // borda do núcleo do vale
+    const outer = this.worldSize * 0.34; // sopé do maciço
+    return Math.min(1, Math.max(0, (dist - inner) / (outer - inner)));
   }
 
-  // Mapa unificado: vale florestal com riacho no centro, maciço ridged
+  // Canal do rio: leito escavado abaixo do nível d'água (-2.38), com
+  // margens suaves — água corrente contínua ao longo de todo o vale
+  riverMask(x, z) {
+    const dist = Math.abs(x - this.getStreamOffset(z));
+    const t = Math.min(1, Math.max(0, (dist - 6.0) / 9.0));
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+  }
+
+  // FBM amortecido por derivada (terrainH/terrainM do shader fdlyW4, iq):
+  // cada oitava é atenuada por 1/(1+‖∇acumulado‖²), o que esculpe cristas
+  // agudas e vertentes erodidas — a assinatura do relevo de montanha do iq.
+  // Domínio ~0.006 (λ0 ≈ 165m) adaptado do 0.003/SC do shader à escala do mapa
+  mountainIq(x, z) {
+    let px = x * 0.006 + 13.7;
+    let pz = z * 0.006 - 4.2;
+    let a = 0.0, b = 1.0, dx = 0.0, dz = 0.0;
+    for (let i = 0; i < 12; i++) {
+      const n = this.noise.noised2(px, pz);
+      dx += n[1]; dz += n[2];
+      a += b * n[0] / (1.0 + dx * dx + dz * dz);
+      b *= 0.5;
+      // p = m2·p·2 com m2 = rotação (0.8, 0.6) — quebra alinhamento axial
+      const qx = 0.8 * px + 0.6 * pz;
+      const qz = -0.6 * px + 0.8 * pz;
+      px = qx * 2.0; pz = qz * 2.0;
+    }
+    return a; // ~0..1.1
+  }
+
+  // Mapa unificado: vale florestal com rio no centro, maciço ridged
   // (estilo Canyon do iq) erguendo-se nas bordas — transição contínua
   getTerrainHeight(x, z) {
     const mask = this.mountMask(x, z);
@@ -36,18 +70,36 @@ export class ForestWorld {
     const fRidge = this.noise.ridge(x * 0.011 + 3.4, z * 0.011 + 9.2, 4) * 0.52;
     const forestH = (base * 15.0 + detail * 4.8 + fRidge * 8.5 - 6.8) * (0.32 + 0.68 * clearing);
 
-    // Maciço: cristas ridged multifractal + volume de fbm
+    // Maciço: fbm com amortecimento por derivada (estilo fdlyW4 do iq) —
+    // picos erodidos com cristas agudas — + volume largo de fbm no sopé
     const massif = this.noise.fbm(x * 0.007 + 3.1, z * 0.007 - 8.4, 4);
-    const mRidge = this.noise.ridge(x * 0.011 + 1.2, z * 0.011 + 4.7, 5);
-    const mDetail = this.noise.fbm(x * 0.06, z * 0.06, 4) * 0.35;
-    const mountH = mRidge * 52.0 + massif * 22.0 + mDetail * 4.0 - 9.0;
+    const mountH = this.mountainIq(x, z) * 88.0 + massif * 14.0 - 7.0;
 
-    // O riacho corre só no vale — nasce encosta abaixo
-    const streamX = this.getStreamOffset(z);
-    const distStream = Math.abs(x - streamX);
-    const streamDip = Math.exp(-(distStream * distStream) / 34.0) * -2.6 * (1.0 - mask);
+    let h = forestH * (1.0 - mask) + mountH * mask;
 
-    return forestH * (1.0 - mask) + mountH * mask + streamDip;
+    // O rio corre só no vale: funde o terreno com o leito escavado
+    // (nasce no sopé do maciço e some encosta acima)
+    const rMask = this.riverMask(x, z) * (1.0 - mask);
+    if (rMask > 0.0) {
+      const bedY = -4.3 + this.noise.fbm(x * 0.22 + 5.5, z * 0.22 - 3.1, 3) * 1.0;
+      h = h * (1.0 - rMask) + bedY * rMask;
+    }
+
+    // Ilha: o terreno mergulha sob o mar além da faixa costeira (~92–120m).
+    // O rio força um estuário até o oceano dentro dessa faixa
+    const seaT = Math.min(1, Math.max(0, (distFromFocus - 92.0) / 28.0));
+    if (seaT > 0.0) {
+      const seaMask = seaT * seaT * (3.0 - 2.0 * seaT);
+      const seaBed = -6.8 + this.noise.fbm(x * 0.15 - 2.0, z * 0.15 + 4.0, 3) * 1.2;
+      const mouthT = Math.min(1, Math.max(0, (distFromFocus - 52.0) / 16.0));
+      const mouth = this.riverMask(x, z) * mouthT * mouthT * (3.0 - 2.0 * mouthT);
+      h = h * (1.0 - mouth) + Math.min(h, seaBed) * mouth;
+      h = h * (1.0 - seaMask) + seaBed * seaMask;
+      // Mergulho extra no meio da faixa costeira: garante linha de praia
+      // definida (morros rasos viram maré, não ilhotas rascantes)
+      h -= seaMask * (1.0 - seaMask) * 14.0;
+    }
+    return h;
   }
 
   getTerrainNormal(x, z) {
@@ -115,54 +167,91 @@ export class ForestWorld {
         const slope = 1.0 - ny;
 
         const mask = this.mountMask(x, z);
-        const snowLine = 26.0 + mossNoise * 8.0;
+        const coastM = Math.min(1, Math.max(0, (Math.hypot(x, z + 6.0) - 90.0) / 28.0));
+        const mT = Math.min(1, Math.max(0, (mask - 0.05) / 0.65));
+        const mountBlend = mT * mT * (3.0 - 2.0 * mT);
         let r, g, b;
         if (y < -2.35) {
-          // Leito de seixos úmidos sob o riacho
-          r = 0.06; g = 0.09; b = 0.08;
-        } else if (y > snowLine) {
-          // Neve acumulada nos picos
-          r = 0.82; g = 0.85; b = 0.88;
-        } else if (slope > 0.30 && mask > 0.35) {
-          // Estratos sedimentares nas encostas do maciço (estilo canyon do iq)
-          const strata = this.noise.fbm(x * 0.05, z * 0.05, 3) * 4.0;
-          const band = 0.5 + 0.5 * Math.sin(y * 0.55 + strata);
-          const s = Math.floor(band * 3.0) / 3.0;
-          r = 0.26 + s * 0.11; g = 0.21 + s * 0.08; b = 0.15 + s * 0.05;
-          const scree = litterNoise * 0.05;
-          r += scree; g += scree; b += scree;
-        } else if (slope > 0.22) {
-          // Encosta rochosa / terra exposta (vale e sopé)
-          const rockMix = Math.min(1.0, (slope - 0.22) * 3.5);
-          r = 0.16 * (1 - rockMix) + 0.14 * rockMix;
-          g = 0.12 * (1 - rockMix) + 0.14 * rockMix;
-          b = 0.08 * (1 - rockMix) + 0.13 * rockMix;
+          // Leito submerso: seixos no rio, areia escura sob o mar
+          r = 0.06 + coastM * 0.16; g = 0.09 + coastM * 0.14; b = 0.08 + coastM * 0.05;
         } else {
-          // Fundo de vale: musgo + serrapilheira. Sobe de altitude: prado alpino
-          const m = Math.max(0, Math.min(1, mossNoise * 1.4 - 0.15));
-          let fr = (0.17 * (1 - m) + 0.07 * m) + litterNoise * 0.045;
-          let fg = (0.12 * (1 - m) + 0.23 * m) + litterNoise * 0.04;
-          let fb = (0.06 * (1 - m) + 0.07 * m) + litterNoise * 0.015;
-          // Manchas macro de terra seca e serrapilheira (vale)
-          const patch = this.noise.fbm(x * 0.045 + 7.7, z * 0.045 - 3.2, 3);
-          const litter = Math.max(0, Math.min(1, (patch - 0.52) * 2.4)) * 0.72 * (1.0 - mask);
-          fr = fr * (1 - litter) + 0.135 * litter;
-          fg = fg * (1 - litter) + 0.105 * litter;
-          fb = fb * (1 - litter) + 0.052 * litter;
+          // Cor base do vale: encosta rochosa / chão de floresta + prado alpino
+          if (slope > 0.22) {
+            const rockMix = Math.min(1.0, (slope - 0.22) * 3.5);
+            r = 0.16 * (1 - rockMix) + 0.14 * rockMix;
+            g = 0.12 * (1 - rockMix) + 0.14 * rockMix;
+            b = 0.08 * (1 - rockMix) + 0.13 * rockMix;
+          } else {
+            // Fundo de vale: musgo + serrapilheira
+            const m = Math.max(0, Math.min(1, mossNoise * 1.4 - 0.15));
+            let fr = (0.17 * (1 - m) + 0.07 * m) + litterNoise * 0.045;
+            let fg = (0.12 * (1 - m) + 0.23 * m) + litterNoise * 0.04;
+            let fb = (0.06 * (1 - m) + 0.07 * m) + litterNoise * 0.015;
+            const patch = this.noise.fbm(x * 0.045 + 7.7, z * 0.045 - 3.2, 3);
+            const litter = Math.max(0, Math.min(1, (patch - 0.52) * 2.4)) * 0.72 * (1.0 - mask);
+            fr = fr * (1 - litter) + 0.135 * litter;
+            fg = fg * (1 - litter) + 0.105 * litter;
+            fb = fb * (1 - litter) + 0.052 * litter;
+            r = fr; g = fg; b = fb;
+          }
 
-          // Prado alpino com manchas rochosas (encostas suaves altas)
-          let ar = (0.13 * (1 - m) + 0.08 * m) + litterNoise * 0.04;
-          let ag = (0.16 * (1 - m) + 0.20 * m) + litterNoise * 0.035;
-          let ab = (0.07 * (1 - m) + 0.06 * m) + litterNoise * 0.015;
-          const rocky = Math.max(0, Math.min(1, (this.noise.fbm(x * 0.05 + 9.3, z * 0.05 + 1.7, 3) - 0.55) * 3.0));
-          ar = ar * (1 - rocky * 0.5) + 0.14 * rocky * 0.5;
-          ag = ag * (1 - rocky * 0.5) + 0.13 * rocky * 0.5;
-          ab = ab * (1 - rocky * 0.5) + 0.11 * rocky * 0.5;
+          // Maciço: paleta do shader fdlyW4 (iq) — rocha escura, scree ocre
+          // nas concavidades, prado nos topos planos e neve por alt+declive
+          if (mountBlend > 0.0) {
+            const rN = this.noise.fbm(x * 0.035 + 2.9, z * 0.035 - 1.3, 4);
+            // Variação macro vertical: estirada em y → bandas suaves de rocha
+            const strata = this.noise.fbm(x * 0.004 + 9.0, y * 0.22, 3);
+            const rockLum = (rN * 0.25 + 0.75) * 0.9;
+            let mr = rockLum * (0.24 + 0.10 * strata);
+            let mg = rockLum * (0.13 + 0.13 * strata);
+            let mb = rockLum * (0.07 + 0.15 * strata);
 
-          r = fr * (1 - mask) + ar * mask;
-          g = fg * (1 - mask) + ag * mask;
-          b = fb * (1 - mask) + ab * mask;
+            // Scree ocre acumulado nas vertentes mais suaves (nor.y ~0.7-0.9)
+            const scree = Math.min(1, Math.max(0, (ny - 0.70) / 0.20));
+            const screeLum = 0.5 + 0.5 * rN;
+            mr = mr * (1 - scree) + 0.30 * screeLum * scree;
+            mg = mg * (1 - scree) + 0.19 * screeLum * scree;
+            mb = mb * (1 - scree) + 0.09 * screeLum * scree;
+
+            // Prado alpino esverdeado só nos planaltos (nor.y ~1)
+            const mead = Math.min(1, Math.max(0, (ny - 0.95) / 0.05));
+            const meadLum = 0.25 + 0.75 * rN;
+            mr = mr * (1 - mead) + 0.18 * meadLum * mead;
+            mg = mg * (1 - mead) + 0.18 * meadLum * mead;
+            mb = mb * (1 - mead) + 0.06 * meadLum * mead;
+
+            // Patchwork macro de luminosidade (o "0.1+1.8·√(fbm·fbm)" do iq)
+            const macro = 0.20 + 1.45 * Math.sqrt(
+              this.noise.fbm(x * 0.06 + 0.7, z * 0.06 - 1.1, 4) *
+              this.noise.fbm(x * 0.008 + 5.5, z * 0.008 + 8.8, 3)
+            );
+            mr *= macro; mg *= macro; mb *= macro;
+
+            // Neve: linha de neve ruidosa (~36-60m) + exigência de encosta
+            // suave + quebra direcional — neve se acumula, não cobre penhasco
+            const snowN = this.noise.fbm(x * 0.014 + 1.7, z * 0.014 - 6.2, 4);
+            const hSnow = Math.min(1, Math.max(0, (y + 22.0 * snowN - 30.0) / 24.0));
+            // Em altitude alta a neve pega até encostas íngremes (eT0 cai a 0.37)
+            const eT0 = 0.92 - 0.55 * hSnow, eT1 = 0.97 - 0.15 * hSnow;
+            const eSnow = Math.min(1, Math.max(0, (ny - eT0) / Math.max(eT1 - eT0, 1e-4)));
+            const oSnow = 0.3 + 0.7 * Math.min(1, Math.max(0, (nx + hSnow * hSnow) / 0.1));
+            const sSnow = hSnow * eSnow * oSnow;
+            const snowM = Math.min(1, Math.max(0, (sSnow - 0.1) / 0.8));
+            mr = mr * (1 - snowM) + 0.70 * snowM;
+            mg = mg * (1 - snowM) + 0.75 * snowM;
+            mb = mb * (1 - snowM) + 0.85 * snowM;
+
+            r = r * (1 - mountBlend) + mr * mountBlend;
+            g = g * (1 - mountBlend) + mg * mountBlend;
+            b = b * (1 - mountBlend) + mb * mountBlend;
+          }
         }
+
+        // Faixa de praia junto à linha d'água na costa (areia clara)
+        const beachAmt = coastM * Math.min(1, Math.max(0, 1.0 - Math.abs(y + 1.35) / 1.35)) * 0.75;
+        r = r * (1 - beachAmt) + 0.34 * beachAmt;
+        g = g * (1 - beachAmt) + 0.30 * beachAmt;
+        b = b * (1 - beachAmt) + 0.19 * beachAmt;
 
         // Variação micro de luminosidade do solo
         const micro = 0.88 + this.noise.noise2D(x * 0.9 + 3.1, z * 0.9 - 1.7) * 0.24;
@@ -198,11 +287,12 @@ export class ForestWorld {
     return { vertices, indices };
   }
 
-  // Plano contínuo de água do riacho em y = -2.38
+  // Plano contínuo de água em y = waterLevel — cobre rio e o oceano
+  // inteiro ao redor da ilha (bem maior que a malha de terreno)
   buildWaterMesh(resolution = 96) {
-    const size = this.worldSize;
+    const size = this.oceanSize;
     const half = size * 0.5;
-    const waterLevel = -2.38;
+    const waterLevel = this.waterLevel;
     const vertices = new Float32Array(resolution * resolution * 12);
     const indices = new Uint32Array((resolution - 1) * (resolution - 1) * 6);
 
@@ -568,7 +658,7 @@ export class ForestWorld {
     return this.packMesh(positions, normals, colors, uvs, indices, 3.0);
   }
 
-  // Tufo de grama silvestre alta para cobrir clareiras e margens do riacho
+  // Tufo de grama silvestre alta para cobrir clareiras e margens do rio
   buildGrassMesh() {
     const positions = [];
     const normals = [];
@@ -808,8 +898,9 @@ export class ForestWorld {
       attempts++;
       const x = rng.range(-half, half);
       const z = rng.range(-half, half);
-      // Mantém vista frontal da clareira e o leito do riacho livres
+      // Mantém vista frontal da clareira e o leito do rio livres
       if (Math.hypot(x, z + 6.0) < 9.5) continue;
+      if (this.riverMask(x, z) > 0.45) continue; // tronco não nasce dentro d'água
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.1) continue;
       if (y > 14.0) continue; // linha das árvores por altitude
@@ -857,11 +948,14 @@ export class ForestWorld {
       }
     }
 
-    // 2. Samambaias — só no vale úmido
+    // 2. Samambaias — só no vale úmido (amostragem polar no disco do vale:
+    // quase todo o mapa fora dele é maciço alto demais para elas)
     const fernTarget = preset.ferns;
+    const vegR = this.worldSize * 0.28;
     for (let i = 0; i < fernTarget; i++) {
-      const x = rng.range(-half, half);
-      const z = rng.range(-half, half);
+      const a = rng.range(0, Math.PI * 2), d = Math.sqrt(rng.next()) * vegR;
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d - 6.0;
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.25 || y > 11.0) continue;
       const density = this.noise.noise2D(x * 0.11 + 20, z * 0.11 - 15);
@@ -870,17 +964,19 @@ export class ForestWorld {
       ferns.push(x, y - 0.04, z, rng.range(0.65, 1.6), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.25), 0.85);
     }
 
-    // 3. Tufos de Grama Alta — vale e prados alpinos
+    // 3. Tufos de Grama Alta — vale e prados alpinos do sopé
     const grassTarget = preset.grassTufts;
+    const grassR = this.worldSize * 0.31;
     for (let i = 0; i < grassTarget; i++) {
-      const x = rng.range(-half, half);
-      const z = rng.range(-half, half);
+      const a = rng.range(0, Math.PI * 2), d = Math.sqrt(rng.next()) * grassR;
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d - 6.0;
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.3 || y > 18.0) continue;
       grasses.push(x, y - 0.03, z, rng.range(0.75, 1.55), rng.range(0, Math.PI * 2), rng.range(0, 100), rng.range(0.8, 1.3), 1.15);
     }
 
-    // 4. Rochas — pequenas no vale/riacho, blocos grandes nas encostas.
+    // 4. Rochas — pequenas no vale/margens do rio, blocos grandes nas encostas.
     // Apoio físico: a base afunda sob o ponto mais baixo amostrado na
     // projeção da rocha sobre a malha renderizada — nunca fica no ar.
     const rockTarget = Math.floor(preset.rocks * 1.6);
@@ -888,7 +984,7 @@ export class ForestWorld {
       const nearStream = i < rockTarget * 0.35;
       const z = rng.range(-half, half);
       const x = nearStream
-        ? this.getStreamOffset(z) + rng.range(-5.5, 5.5)
+        ? this.getStreamOffset(z) + rng.range(-8.0, 8.0)
         : rng.range(-half, half);
       if (Math.hypot(x, z + 6.0) < 5.0) continue;
       const mask = this.mountMask(x, z);
@@ -912,9 +1008,11 @@ export class ForestWorld {
 
     // 5. Troncos Caídos + Aglomerados de Cogumelos Bioluminescentes (só no vale)
     const logTarget = preset.fallenLogs;
+    const logR = this.worldSize * 0.26;
     for (let i = 0; i < logTarget; i++) {
-      const x = rng.range(-half * 0.85, half * 0.85);
-      const z = rng.range(-half * 0.85, half * 0.85);
+      const a = rng.range(0, Math.PI * 2), d = Math.sqrt(rng.next()) * logR;
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d - 6.0;
       if (Math.hypot(x, z + 6.0) < 7.5) continue;
       const y = this.getMeshHeight(x, z, res, meshCache);
       if (y < -2.1 || y > 12.0) continue;
